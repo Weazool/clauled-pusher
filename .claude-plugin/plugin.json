@@ -1,0 +1,19 @@
+{
+  "name": "clauled-pusher",
+  "description": "Pushes Claude Code usage and attention events to a Clauled ESP32 desk display over the local network",
+  "version": "1.0.0",
+  "author": {
+    "name": "Weazool"
+  },
+  "homepage": "https://github.com/Weazool/clauled-pusher",
+  "repository": "https://github.com/Weazool/clauled-pusher",
+  "license": "MIT",
+  "keywords": [
+    "clauled",
+    "esp32",
+    "statusline",
+    "hooks",
+    "usage",
+    "notifications"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to ~/.clauled.json and fill in your push key. Do not commit the real file.",
+  "url": "http://clauled.local",
+  "key": "",
+  "timeoutMs": 1000
+}

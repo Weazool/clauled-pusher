@@ -1,0 +1,9 @@
+node_modules/
+
+# Local device config - holds your push key. Never commit it.
+.clauled.json
+
+# Raw statusline/hook payload captures from CLAULED_DEBUG=1.
+# May contain whatever Claude Code sends, including paths and prompts.
+*.log
+clauled-debug.log
