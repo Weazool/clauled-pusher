@@ -6,7 +6,7 @@
 // Nothing here may throw or hang: these run inside Claude Code's statusline and
 // hook paths, where a slow script is felt as UI lag on every turn.
 
-import { readFileSync, writeFileSync, appendFileSync, openSync, writeSync, readSync, closeSync, fstatSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, openSync, writeSync, readSync, closeSync, fstatSync, existsSync, readdirSync, constants as C } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -18,13 +18,21 @@ const MODEL_CACHE = join(homedir(), '.clauled-model');
 const DEBUG_PATH  = join(homedir(), '.clauled-debug.log');
 const ESP_VID     = '303A';          // Espressif
 const CACHE_TTL_MS = 5 * 60 * 1000;  // re-scan at most every 5 minutes
+const MISS_TTL_MS  = 30 * 1000;      // ...but retry a miss sooner than that
 
 /** Optional. Only needed to override auto-detection or turn on debug capture. */
 export function loadConfig() {
-  const cfg = { port: '', debug: false, token: '' };
-  try {
-    Object.assign(cfg, JSON.parse(readFileSync(CONFIG_PATH, 'utf8')));
-  } catch { /* absent is the normal case */ }
+  const cfg = { port: '', debug: false, token: '', configError: '' };
+  let text = null;
+  try { text = readFileSync(CONFIG_PATH, 'utf8'); } catch { /* absent is normal */ }
+  if (text !== null) {
+    // Absent and malformed are different problems. Treating them the same threw
+    // away the port override, the debug flag and the token in silence - easy to
+    // hit on Windows, where the natural thing to paste is a backslash path that
+    // is not valid JSON.
+    try { Object.assign(cfg, JSON.parse(text)); }
+    catch (e) { cfg.configError = e?.message ?? 'invalid JSON'; }
+  }
   if (process.env.CLAULED_PORT) cfg.port = process.env.CLAULED_PORT;
   return cfg;
 }
@@ -32,12 +40,23 @@ export function loadConfig() {
 export function readStdin() {
   return new Promise((resolve) => {
     let buf = '';
+    let done = false;
     // If nothing is piped in, don't hang the host process waiting for EOF.
-    const guard = setTimeout(() => resolve(buf), 2000);
+    // Resolving is not enough on its own: a stdin in flowing mode keeps a
+    // ref'd handle alive, so the event loop would never drain and the process
+    // would sit there after its work was finished. Release it explicitly.
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(guard);
+      try { process.stdin.pause(); process.stdin.unref(); } catch { /* already gone */ }
+      resolve(buf);
+    };
+    const guard = setTimeout(finish, 2000);
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (c) => (buf += c));
-    process.stdin.on('end', () => { clearTimeout(guard); resolve(buf); });
-    process.stdin.on('error', () => { clearTimeout(guard); resolve(buf); });
+    process.stdin.on('end', finish);
+    process.stdin.on('error', finish);
   });
 }
 
@@ -61,6 +80,10 @@ export function debugLog(tag, data) {
 }
 
 // ── Port discovery ────────────────────────────────────────────
+//
+// Every platform matches on the Espressif vendor ID. That matters: a machine
+// typically has several USB serial devices - this one has a Logitech receiver
+// on COM7 - and "the first serial port" is not a device identity.
 
 /** Windows device path for a COM port: \\.\COM12 (needed above COM9). */
 function winPath(com) {
@@ -68,98 +91,308 @@ function winPath(com) {
   return B + B + '.' + B + com;
 }
 
+/**
+ * Absolute path to PowerShell. Resolving via PATH means a trimmed or reordered
+ * PATH turns into a bare ENOENT that gets swallowed as "device not found".
+ *
+ * pwsh is fine for discovery but NOT for the status probe: PowerShell 7 dropped
+ * System.IO.Ports from the box, so the probe needs Windows PowerShell 5.1.
+ */
+function psExe({ needSerialPort = false } = {}) {
+  const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+  const wps = join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  if (existsSync(wps)) return wps;
+  return needSerialPort ? '' : 'pwsh';
+}
+
 function detectWindows() {
   // PowerShell rather than a native module: no dependency, no build step.
+  const exe = psExe();
+  if (!exe) return '';
   const ps =
     "Get-CimInstance Win32_PnPEntity | " +
     `Where-Object { $_.PNPDeviceID -like '*VID_${ESP_VID}*' -and $_.Name -match 'COM\\d+' } | ` +
     "ForEach-Object { if ($_.Name -match '(COM\\d+)') { $Matches[1] } }";
-  const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+  const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', ps], {
     encoding: 'utf8',
     timeout: 5000,
     windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   const com = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
   return com ? winPath(com) : '';
 }
 
-function detectUnix() {
-  // by-id carries the VID and is stable across reboots; fall back to raw nodes.
-  const byId = '/dev/serial/by-id';
-  if (existsSync(byId)) {
-    const hit = readdirSync(byId).find((f) => f.toLowerCase().includes(ESP_VID.toLowerCase()));
-    if (hit) return join(byId, hit);
+/**
+ * macOS. `ioreg` is in /usr/sbin on every install and exposes the USB tree with
+ * both the vendor ID and the BSD callout name, so no native module is needed.
+ *
+ * Only /dev/cu.* is ever returned. The matching /dev/tty.* is the dial-in node,
+ * and open(2) on it BLOCKS until carrier is asserted - which for a hook running
+ * on the UI path means a hang, not an error.
+ */
+function detectDarwin() {
+  const vid = parseInt(ESP_VID, 16);           // 0x303A -> 12346
+  let out = '';
+  try {
+    out = execFileSync('/usr/sbin/ioreg', ['-r', '-c', 'IOUSBHostDevice', '-l'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    out = '';
   }
-  for (const dir of ['/dev']) {
-    if (!existsSync(dir)) continue;
-    const hit = readdirSync(dir).find(
-      (f) => f.startsWith('ttyACM') || f.startsWith('cu.usbmodem') || f.startsWith('tty.usbmodem'),
-    );
-    if (hit) return join(dir, hit);
+
+  // ioreg prints one indented subtree per USB device. Walk it linearly and
+  // remember whether the device we are inside matched the vendor, then take the
+  // first callout beneath it.
+  if (out) {
+    let inMatch = false;
+    for (const line of out.split('\n')) {
+      if (/^\s*\+\-o /.test(line)) inMatch = false;          // a new device subtree
+      const v = line.match(/"idVendor"\s*=\s*(\d+)/);
+      if (v) inMatch = parseInt(v[1], 10) === vid;
+      if (inMatch) {
+        const c = line.match(/"IOCalloutDevice"\s*=\s*"([^"]+)"/);
+        if (c && c[1].includes('/cu.')) return c[1];
+      }
+    }
   }
+
+  // Fallback: cu nodes only, sorted so the choice is at least deterministic.
+  // This cannot confirm the vendor, so it is a last resort rather than the
+  // normal path - see the doctor output, which says so plainly.
+  try {
+    const hit = readdirSync('/dev')
+      .filter((f) => f.startsWith('cu.usbmodem'))
+      .sort()[0];
+    if (hit) return join('/dev', hit);
+  } catch { /* no /dev listing */ }
   return '';
+}
+
+/** Linux. sysfs carries the vendor ID next to each tty, so match on it. */
+function detectLinux() {
+  const byId = '/dev/serial/by-id';
+  try {
+    if (existsSync(byId)) {
+      // by-id names carry the product string, not the numeric VID, so this is
+      // a convenience match only - the sysfs check below is the real one.
+      const hit = readdirSync(byId).find((f) => /esp|jtag|serial/i.test(f));
+      if (hit) return join(byId, hit);
+    }
+  } catch { /* fall through */ }
+
+  const matches = (name) => {
+    try {
+      const v = readFileSync(`/sys/class/tty/${name}/device/../idVendor`, 'utf8');
+      return v.trim().toLowerCase() === ESP_VID.toLowerCase();
+    } catch { return false; }
+  };
+  try {
+    const hit = readdirSync('/dev').filter((f) => f.startsWith('ttyACM')).sort().find(matches);
+    if (hit) return join('/dev', hit);
+  } catch { /* no /dev listing */ }
+  return '';
+}
+
+/** Accept "COM8", "\\.\COM8" or a POSIX device path, whatever the platform. */
+function normalizePort(p) {
+  return platform() === 'win32' && /^COM\d+$/i.test(p) ? winPath(p) : p;
 }
 
 /**
  * Resolve the device path. Detection is cached because the statusline runs
- * often and spawning PowerShell every render would be felt as lag.
+ * often and a scan costs over a second - measured at 1.2-1.4 s on Windows.
  * Pass force=true to bypass the cache after a failed write.
  */
 export function findPort(force = false) {
   const cfg = loadConfig();
-  if (cfg.port) {
-    return platform() === 'win32' && /^COM\d+$/i.test(cfg.port) ? winPath(cfg.port) : cfg.port;
-  }
+  if (cfg.port) return normalizePort(cfg.port);
 
   if (!force) {
     try {
-      const { path, at } = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
-      if (path && Date.now() - at < CACHE_TTL_MS) return path;
+      const { path, at, miss } = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
+      if (Date.now() - at < (miss ? MISS_TTL_MS : CACHE_TTL_MS)) return miss ? '' : (path || '');
     } catch { /* no usable cache */ }
   }
 
   let path = '';
   try {
-    path = platform() === 'win32' ? detectWindows() : detectUnix();
+    path = platform() === 'win32' ? detectWindows()
+         : platform() === 'darwin' ? detectDarwin()
+         : detectLinux();
   } catch { path = ''; }
 
-  if (path) {
-    try { writeFileSync(CACHE_PATH, JSON.stringify({ path, at: Date.now() })); } catch {}
-  }
+  // MISSES ARE CACHED TOO. Without this, an unplugged device meant every hook
+  // paid for a full enumeration - more than once - before every single tool
+  // call, which reads as Claude Code itself having gone slow.
+  try {
+    writeFileSync(CACHE_PATH, JSON.stringify(
+      path ? { path, at: Date.now() } : { miss: true, at: Date.now() },
+    ));
+  } catch { /* an uncacheable miss is slow, not wrong */ }
   return path;
 }
 
 // ── Transport ─────────────────────────────────────────────────
 
 function writeLine(path, line) {
-  const fd = openSync(path, 'w');
+  const buf = Buffer.from(line, 'utf8');
+
+  // Deliberately NOT 'w'. That flag is O_WRONLY|O_CREAT|O_TRUNC, so a wrong or
+  // stale path does not fail - it CREATES A REGULAR FILE there, every push
+  // then "succeeds" into it, and doctor reports a healthy device that is not
+  // plugged in. Without O_CREAT a missing device is an honest ENOENT.
+  //
+  // O_NOCTTY: never let a serial device become this process's controlling
+  // terminal. O_NONBLOCK: only cu.* is ever opened, but a hook runs on the UI
+  // path and must not be able to block in open() under any circumstances.
+  const flags = platform() === 'win32'
+    ? C.O_WRONLY
+    : (C.O_WRONLY | C.O_NOCTTY | C.O_NONBLOCK);
+
+  const fd = openSync(path, flags);
   try {
-    writeSync(fd, line);
+    let off = 0;
+    let spins = 0;
+    while (off < buf.length) {
+      let n;
+      try {
+        n = writeSync(fd, buf, off, buf.length - off);
+      } catch (err) {
+        // O_NONBLOCK means a momentarily full CDC transmit buffer surfaces as
+        // EAGAIN rather than a wait. Spin briefly, but bounded - 100 ms.
+        if ((err?.code === 'EAGAIN' || err?.code === 'EWOULDBLOCK') && spins++ < 20) {
+          sleepSync(5);
+          continue;
+        }
+        throw err;
+      }
+      // A short write is legal on a character device. Ignoring the return value
+      // would silently drop the tail, and the device would see a truncated line
+      // that fails to parse - an intermittent fault that looks like corruption.
+      if (n <= 0) throw Object.assign(new Error('short write'), { code: 'EIO' });
+      off += n;
+    }
   } finally {
     closeSync(fd);
   }
 }
 
+/** Block briefly without pulling in a timer. Only used on a port collision. */
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* best effort */ }
+}
+
 /**
  * Send one JSON object as a line. Always resolves - never throws, never hangs.
- * On failure it re-detects the port once, so unplugging and replugging into a
- * different USB socket recovers by itself.
+ *
+ * Two failure classes need different remedies:
+ *   EPERM/EBUSY/EACCES - another process holds the port for an instant. In
+ *     practice that is two hooks firing together, or a serial monitor left
+ *     open. Re-detecting returns the same port, so it does nothing; a short
+ *     wait is what actually helps.
+ *   anything else - the device probably moved to a different port, so
+ *     re-detect and try again. This is what makes replugging self-heal.
  */
 export function push(body) {
   const line = JSON.stringify(body) + '\n';
+  const BUSY = new Set(['EPERM', 'EBUSY', 'EACCES']);
+  let reason = 'device not found';
+  let rescanned = false;
 
-  for (const force of [false, true]) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Re-detect AT MOST ONCE per push. A scan costs over a second, and this
+    // runs before every tool call - paying for it repeatedly turns an unplugged
+    // device into what feels like Claude Code itself hanging.
+    const force = attempt > 0 && !rescanned && !BUSY.has(reason);
+    if (force) rescanned = true;
+
     const path = findPort(force);
-    if (!path) continue;
+    if (!path) {
+      reason = 'device not found';
+      if (rescanned) break;      // already looked again; nothing more to try
+      continue;
+    }
     try {
       writeLine(path, line);
       return { ok: true, port: path };
     } catch (err) {
-      debugLog('push-error', `${path}: ${err?.code ?? err?.message}`);
-      // fall through and retry with fresh detection
+      reason = err?.code ?? err?.message ?? 'write failed';
+      debugLog('push-error', `${path}: ${reason} (attempt ${attempt + 1})`);
+      if (BUSY.has(reason)) sleepSync(25 + attempt * 25);   // 75 ms worst case
     }
   }
-  return { ok: false, reason: 'device not found' };
+  return { ok: false, reason };
+}
+
+/**
+ * Round-trip probe on POSIX. `stty` puts the line in raw mode so the tty layer
+ * does not echo our own write back or buffer the reply by line; the fd is
+ * non-blocking so a silent device times out instead of hanging.
+ *
+ * NOT VERIFIED ON REAL macOS HARDWARE - it is written to fail into the
+ * write-only path rather than to hang or to report a false negative.
+ */
+function probeUnix(path) {
+  // BSD stty takes -f, GNU takes -F. CDC ignores line coding, so a failure
+  // here is not fatal; try both and carry on regardless.
+  for (const flag of ['-f', '-F']) {
+    try {
+      execFileSync('/bin/stty', [flag, path, 'raw', '-echo'], { timeout: 3000, stdio: 'ignore' });
+      break;
+    } catch { /* try the other spelling */ }
+  }
+
+  let fd;
+  try {
+    fd = openSync(path, C.O_RDWR | C.O_NOCTTY | C.O_NONBLOCK);
+  } catch (err) {
+    return { ok: false, port: path, reason: err?.code ?? 'open failed' };
+  }
+
+  try {
+    const line = Buffer.from(JSON.stringify({ v: 3, cmd: 'status' }) + '\n', 'utf8');
+    for (let off = 0, spins = 0; off < line.length; ) {
+      try {
+        off += writeSync(fd, line, off, line.length - off);
+      } catch (err) {
+        if (err?.code === 'EAGAIN' && spins++ < 20) { sleepSync(5); continue; }
+        throw err;
+      }
+    }
+
+    const buf = Buffer.alloc(4096);
+    let text = '';
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      let n = 0;
+      try {
+        n = readSync(fd, buf, 0, buf.length, null);
+      } catch (err) {
+        if (err?.code === 'EAGAIN') { sleepSync(25); continue; }
+        throw err;
+      }
+      if (n <= 0) { sleepSync(25); continue; }
+      text += buf.subarray(0, n).toString('utf8');
+      for (const l of text.split(/\r?\n/).map((s) => s.trim())) {
+        if (!l.startsWith('{')) continue;
+        let j;
+        try { j = JSON.parse(l); } catch { continue; }
+        // Insist on the status shape: a stray {"ok":true} from an earlier push
+        // must not be mistaken for a reply to this probe.
+        if (j.version !== undefined) return { ok: true, port: path, status: j };
+      }
+    }
+    return { ok: false, port: path, reason: 'no reply within 2.5s' };
+  } catch (err) {
+    return { ok: false, port: path, reason: err?.code ?? err?.message ?? 'probe failed' };
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+  }
 }
 
 /**
@@ -172,10 +405,14 @@ export function probeStatus() {
   if (!path) return { ok: false, reason: 'device not found' };
 
   if (platform() !== 'win32') {
-    // Reading a tty from Node without a native module is unreliable; a
-    // successful write is the best signal available here.
-    const r = push({ v: 3, cmd: 'status' });
-    return r.ok ? { ok: true, port: path, note: 'write-only probe' } : r;
+    const r = probeUnix(path);
+    if (r.ok) return r;
+    // A real round trip is preferred, but never let its failure masquerade as
+    // an unreachable device - fall back to the write-only signal and say so.
+    const w = push({ v: 3, cmd: 'status' });
+    return w.ok
+      ? { ok: true, port: path, note: `write-only probe (round trip: ${r.reason})` }
+      : w;
   }
 
   const com = path.replace(/^\\\\\.\\/, '');
@@ -198,17 +435,26 @@ $out = $p.ReadExisting()
 $p.Close()
 foreach ($l in ($out -split "\`r?\`n")) { if ($l.Trim().StartsWith('{')) { Write-Output $l.Trim() } }
 `;
+  // System.IO.Ports was dropped from PowerShell 7, so this needs 5.1.
+  const exe = psExe({ needSerialPort: true });
+  if (!exe) return { ok: false, port: path, reason: 'Windows PowerShell 5.1 not found' };
+
   try {
-    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+    const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', ps], {
       encoding: 'utf8',
       timeout: 12000,
       windowsHide: true,
+      // Inheriting stderr dumped a raw .NET stack trace into the user's
+      // terminal, which doctor then misdiagnosed as "another program is
+      // holding the port". Capture it and report the first line instead.
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     const line = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.startsWith('{')).pop();
     if (!line) return { ok: false, port: path, reason: 'no reply' };
     return { ok: true, port: path, status: JSON.parse(line) };
   } catch (err) {
-    return { ok: false, port: path, reason: err?.message?.split('\n')[0] ?? 'probe failed' };
+    const detail = String(err?.stderr ?? '').split('\n').map((s) => s.trim()).filter(Boolean)[0];
+    return { ok: false, port: path, reason: detail || err?.message?.split('\n')[0] || 'probe failed' };
   }
 }
 
@@ -237,10 +483,32 @@ function readToken() {
   try {
     const j = JSON.parse(readFileSync(CREDS_PATH, 'utf8'));
     const o = j.claudeAiOauth || j;
-    return o.accessToken || '';
-  } catch {
-    return '';
+    if (o.accessToken) return o.accessToken;
+  } catch { /* fall through to the platform store */ }
+
+  // macOS keeps Claude Code's credentials in the login Keychain, not in a
+  // file, so the check above finds nothing there however the app is set up.
+  // This prompts for Keychain access the first time and is skipped silently if
+  // the user declines - the gauge simply stays unavailable.
+  if (platform() === 'darwin') {
+    try {
+      const out = execFileSync(
+        '/usr/bin/security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      const j = JSON.parse(out.trim());
+      return (j.claudeAiOauth || j).accessToken || '';
+    } catch { /* not present, or access declined */ }
   }
+  return '';
+}
+
+/** Where a token would come from on this platform, for diagnostics. */
+export function tokenSourceHint() {
+  return platform() === 'darwin'
+    ? 'the login Keychain ("Claude Code-credentials") or "token" in ~/.clauled.json'
+    : '~/.claude/.credentials.json or "token" in ~/.clauled.json';
 }
 
 /** Whatever is on disk, however old. Never blocks. */
@@ -251,6 +519,69 @@ export function readCachedQuota() {
   } catch {
     return null;
   }
+}
+
+function cacheQuota(data) {
+  try { writeFileSync(QUOTA_CACHE, JSON.stringify({ at: Date.now(), data })); } catch {}
+}
+
+const pct100 = (n) => Math.max(0, Math.min(100, n));
+
+/**
+ * The 5h figure, preferring the statusline payload's own `rate_limits`.
+ *
+ * Claude Code DOES send rate_limits - contrary to what this file used to
+ * claim. It just does not send it on every invocation, so a sampling pass that
+ * happened to catch only the reduced payloads concluded it never did. When the
+ * block is present it is authoritative and free; the reading is cached so hooks
+ * and reduced payloads can still render it, and so the authenticated API call
+ * becomes a fallback rather than the only source.
+ *
+ * Verified: a payload's `five_hour.resets_at` matched the epoch returned by the
+ * API's anthropic-ratelimit-unified-5h-reset header exactly.
+ */
+export function readQuota(d) {
+  const rl = d?.rate_limits;
+  const five = rl?.five_hour;
+  if (five && Number.isFinite(five.used_percentage)) {
+    const week = rl?.seven_day;
+    const data = {
+      pct: pct100(five.used_percentage),
+      resetAt: Number.isFinite(five.resets_at) ? five.resets_at : null,
+      // Recorded because it costs nothing; the device has no third gauge yet.
+      week: week && Number.isFinite(week.used_percentage) ? pct100(week.used_percentage) : null,
+      weekResetAt: Number.isFinite(week?.resets_at) ? week.resets_at : null,
+      source: 'payload',
+    };
+    cacheQuota(data);
+    return data;
+  }
+  return readCachedQuota();
+}
+
+/**
+ * Context occupancy, as {used, size}.
+ *
+ * The payload's `context_window` block is authoritative when present - it also
+ * used to be documented here as always zero, and it is not. The transcript is
+ * the fallback, which is what hooks and reduced payloads rely on.
+ */
+export function readContext(d) {
+  const cw = d?.context_window;
+  const size = cw?.context_window_size || 0;
+
+  if (size) {
+    const cu = cw.current_usage;
+    const used = cu
+      ? (cu.input_tokens || 0) + (cu.cache_read_input_tokens || 0) + (cu.cache_creation_input_tokens || 0)
+      : (cw.total_input_tokens || 0);
+    if (used > 0) return { used, size };
+  }
+
+  const u = readTranscriptUsage(d?.transcript_path);
+  // Without a stated window, 1M is the current default across Claude 5 models.
+  if (u) return { used: u.used, size: size || 1_000_000 };
+  return null;
 }
 
 /** Does the actual API call. Run from refresh-quota.mjs, never inline. */
@@ -304,6 +635,10 @@ export async function refreshQuota() {
 export function maybeRefreshQuota() {
   const cached = readCachedQuota();
   if (cached && !cached.stale) return;
+  // Without a token the refresh cannot succeed, so it never writes a cache, so
+  // the cache stays stale, so we would spawn a doomed child process on EVERY
+  // statusline render. Check first.
+  if (!readToken()) return;
   try {
     const script = join(dirname(fileURLToPath(import.meta.url)), 'refresh-quota.mjs');
     const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
@@ -376,12 +711,15 @@ export function fmtDuration(ms) {
 
 // Unknown levels fall back to the raw value in buildTitle rather than being
 // dropped - that silently lost "ultra" until it was noticed on the glass.
+// Only `medium` is abbreviated. The device's bottom row has 14 characters for
+// the model and effort together, and every real combination fits with the
+// level spelled out - "Sonnet 5 xhigh" is exactly 14.
 const EFFORT_SHORT = {
   low: 'low',
   medium: 'med',
   high: 'high',
-  xhigh: 'xhi',
-  ultra: 'ult',
+  xhigh: 'xhigh',
+  ultra: 'ultra',
   max: 'max',
 };
 
@@ -443,27 +781,34 @@ export function buildDisplay(d) {
   const title = buildTitle(d);
   if (title) out.title = title;
 
-  // Gauge 1 - 5h quota (cached; refreshed detached when stale)
-  maybeRefreshQuota();
-  const quota = readCachedQuota();
-  out.gauge1 = { label: '5h session', pct: quota ? Math.round(quota.pct * 10) / 10 : -1 };
+  // NOTHING BELOW IS EMITTED UNLESS IT WAS ACTUALLY COMPUTED.
+  //
+  // Claude Code does not send the same payload every time - some invocations
+  // arrive with only {model, effort}. Emitting pct:-1 for the missing feeds
+  // meant one of those reduced payloads actively overwrote good readings with
+  // "--", which is exactly what it looked like on the glass. The device merges,
+  // so staying silent leaves the last good value in place; a stale number is
+  // far better than a blank one, and the footer already shows staleness.
+  const round1 = (n) => Math.round(n * 10) / 10;
 
-  // Gauge 2 - context window (live from the transcript)
-  const size = d?.context_window?.context_window_size || 0;
-  const usage = readTranscriptUsage(d?.transcript_path);
-  const ctxPct = usage && size ? Math.min(100, (usage.used / size) * 100) : -1;
-  out.gauge2 = { label: 'Context', pct: ctxPct >= 0 ? Math.round(ctxPct * 10) / 10 : -1 };
+  // Labels are short because the device composes them into a single 21-char
+  // line with the detail and the percentage: "5h reset 4h33m 55%".
+  const quota = readQuota(d);
+  if (quota) out.gauge1 = { label: '5h reset', pct: round1(quota.pct) };
+  else maybeRefreshQuota();   // only pay for the API when nothing cheaper has it
 
-  // Detail row pairs each gauge with its most useful companion number.
-  out.row = {
-    left: quota ? fmtUntil(quota.resetAt) : '',
-    right: usage && size ? `${fmtTokens(usage.used)}/${fmtTokens(size)}` : '',
-  };
+  const ctx = readContext(d);
+  if (ctx) out.gauge2 = { label: 'ctx', pct: round1(Math.min(100, (ctx.used / ctx.size) * 100)) };
 
-  const cost = d?.cost || {};
-  out.footer = {
-    left: typeof cost.total_cost_usd === 'number' ? '$' + cost.total_cost_usd.toFixed(2) : '',
-  };
+  // Detail row pairs each gauge with its most useful companion number. Each
+  // side is independent - one feed being unavailable must not blank the other.
+  const row = {};
+  if (quota?.resetAt) row.left = fmtUntil(quota.resetAt);
+  if (ctx) row.right = `${fmtTokens(ctx.used)}/${fmtTokens(ctx.size)}`;
+  if (Object.keys(row).length) out.row = row;
+
+  const cost = d?.cost?.total_cost_usd;
+  if (typeof cost === 'number') out.footer = { left: '$' + cost.toFixed(2) };
 
   return out;
 }

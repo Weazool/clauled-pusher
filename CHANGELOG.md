@@ -7,6 +7,101 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-13
+
+Works on macOS. Needs no credential. Pairs with Clauled firmware v3.1.0.
+
+### Added
+- **`node bin/install.mjs`** — the one setup step, done safely. Writes a shim to
+  `~/.clauled/`, points `statusLine` at it, backs up `settings.json` first,
+  refuses to clobber a status line that is not ours without `--force`, and then
+  **runs the command through the same shells Claude Code uses** to prove it
+  works rather than assuming it will. `--print`, `--force`, `--uninstall`.
+- **macOS device discovery by vendor ID**, via `ioreg`. There was previously no
+  vendor filtering off Windows at all — `/dev/serial/by-id` is a Linux udev
+  construct, so macOS fell through to an unfiltered prefix scan and would bind
+  to whatever `usbmodem` device `readdir` happened to list first. An Arduino, an
+  STM32 Nucleo, another ESP board.
+- **macOS round-trip status probe**, so `doctor` reports firmware version,
+  `display_ok` and uptime there too. It falls back to the write-only probe
+  rather than reporting a false negative.
+- **macOS Keychain token fallback** — Claude Code stores credentials in the
+  login Keychain there, not in `~/.claude/.credentials.json`, so the file check
+  could never succeed.
+- **Linux vendor matching via sysfs**, replacing a `ttyACM` prefix scan with no
+  vendor check.
+- **`doctor` diagnoses the setup, not just the device**: malformed config,
+  statusline wiring, whether the interpreter it names still exists, whether it
+  points into a plugin directory, and whether a shell can resolve `node` at all.
+- `.gitattributes`, pinning LF. A CRLF shebang makes the kernel look for an
+  interpreter called `node\r`.
+
+### Changed
+- **The 5h gauge no longer needs a token.** It now comes from the statusline
+  payload's `rate_limits` block, which also carries `seven_day`. The
+  authenticated API call is demoted to a fallback for hosts that never send it.
+- **Context comes from the payload's `context_window`** when present, with the
+  transcript as the fallback.
+- **Gauge labels are shorter** (`5h reset`, `ctx`) because firmware v3.1.0
+  composes them into a single 21-character line with the detail and percentage.
+  The selftest asserts both lines fit at 100%, which is the widest case.
+- Effort levels are spelled out — `xhigh`, not `xhi`. Only `medium` is
+  abbreviated; everything else fits the bottom row's 14 characters.
+- **Port discovery caches misses**, for 30 seconds. Without that an unplugged
+  device made every hook pay for a full enumeration — measured at 1.2–1.4 s per
+  scan — before every single tool call, which reads as Claude Code having gone
+  slow. Re-detection is also capped at once per push.
+
+### Fixed
+- **A reduced payload blanked the gauges to `--`.** Claude Code does not send
+  the same keys every time; some invocations carry only `{model, effort}`.
+  Emitting `pct: -1` for the missing feeds meant those payloads actively
+  overwrote good readings, because the device merges and `-1` is data. Fields
+  that cannot be computed are now omitted entirely, so the last good value
+  survives.
+- **A wrong port silently created a regular file and reported success.**
+  `openSync(path, 'w')` is `O_WRONLY|O_CREAT|O_TRUNC`, so pushes "succeeded"
+  into a file on disk and `doctor` cheerfully reported a healthy device that was
+  not plugged in. Now an honest `ENOENT`.
+- **Write collisions were not retried.** Two hooks firing together produced
+  `EPERM` on Windows; re-detecting returns the same port, so it did nothing. A
+  short bounded wait is what actually helps.
+- **Short writes were ignored**, which would truncate a line and present as
+  intermittent corruption.
+- **A doomed refresh child was spawned on every statusline render** for anyone
+  without a token: the refresh could not succeed, so it never wrote a cache, so
+  the cache stayed stale, so it spawned again.
+- **`powershell` was resolved via `PATH`** with no fallback; a trimmed `PATH`
+  became a bare `ENOENT` swallowed as "device not found". Now an absolute path,
+  and the probe reports PowerShell's stderr instead of leaking a raw .NET stack
+  trace and misdiagnosing it as a busy port.
+- **A malformed `~/.clauled.json` silently discarded every setting.** Absent and
+  invalid are now different things, and `doctor` says which.
+- **`readStdin`'s timeout left stdin ref'd**, so a host that never closed the
+  pipe would have hung the process. Not observed in practice — the handle is
+  released explicitly now regardless.
+- **The selftest read the developer's real home directory**, so results depended
+  on whether that machine happened to have a token configured. That is how
+  `gauge1 is -1 with no token` passed while testing nothing. It now runs against
+  its own throwaway home.
+
+### Notes
+- **Two things this project documented were wrong**, both concluded from a
+  sample that happened to contain only reduced payloads: `rate_limits` *is* sent
+  in the statusline payload, and `context_window` *does* populate. A payload's
+  `five_hour.resets_at` matches the API header epoch exactly.
+- **`node` may not be on `PATH` for hooks on macOS.** A GUI launch from Finder
+  inherits launchd's environment, not your shell's, and Claude Code exports no
+  variable pointing at an interpreter. `install.mjs` sidesteps this for the
+  statusline by baking in an absolute path; hooks cannot be fixed from here, so
+  `doctor` checks and reports it.
+- **Quoting is hostile across shells.** `"C:/Program Files/nodejs/node.exe" x`
+  runs under sh, Git Bash and cmd, but PowerShell treats a leading quoted token
+  as a string literal and prints it — no status line, no error. The installer
+  emits an unquoted space-free path, using the DOS 8.3 alias on Windows.
+- macOS uses `/dev/cu.*` only. Opening the `tty.*` dial-in node blocks until
+  carrier is asserted, which in a hook is a hang rather than an error.
+
 ## [3.0.2] - 2026-08-13
 
 Requires Clauled firmware v3.0.1 for the banner fix.

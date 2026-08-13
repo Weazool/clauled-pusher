@@ -1,0 +1,10 @@
+# Line endings are normalised in the repository and checked out as LF
+# everywhere. The .mjs entry points carry a #!/usr/bin/env node shebang, and a
+# CRLF there makes the kernel look for an interpreter called "node\r" - which
+# fails on macOS and Linux with a message that names neither the file nor the
+# real cause.
+* text=auto eol=lf
+
+*.mjs  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf

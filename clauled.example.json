@@ -1,9 +1,17 @@
 {
   "_comment": "All optional. Copy to ~/.clauled.json only if you need one of these.",
-  "_port": "Override device auto-detection. Windows COM8, Linux /dev/ttyACM0, macOS /dev/cu.usbmodem*",
+
+  "_port": "Override device auto-detection. Normally unnecessary - the device is found by its Espressif vendor ID (303A) on every platform.",
+  "_port_windows": "COM8",
+  "_port_macos": "/dev/cu.usbmodem1101",
+  "_port_linux": "/dev/ttyACM0",
+  "_port_note": "On macOS always use the cu.* node, never tty.* - opening a tty.* device blocks until carrier is asserted.",
   "port": "",
-  "_debug": "Capture raw statusline and hook payloads to ~/.clauled-debug.log",
+
+  "_debug": "Capture raw statusline and hook payloads to ~/.clauled-debug.log. Contains prompts and file paths; check before sharing.",
   "debug": false,
-  "_token": "OAuth token from 'claude setup-token'. Enables the 5h subscription gauge. Without it that gauge shows --",
+
+  "_token": "Optional fallback for the 5h gauge. Normally NOT needed - Claude Code sends rate_limits in the statusline payload, which is used automatically. Only set this if that gauge never populates. From 'claude setup-token'.",
+  "_token_permissions": "If you set it, chmod 600 ~/.clauled.json - it is a real credential valid for a year.",
   "token": ""
 }
