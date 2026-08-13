@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, loadConfig, readCachedQuota, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, tokenSourceHint } from './clauled.mjs';
 
 let failures = 0;
 const ok   = (m) => console.log(`  ok    ${m}`);
@@ -101,6 +101,25 @@ if (port) {
 
   if (display.ok && event.ok) {
     note('the screen should show two gauges and a test banner');
+  }
+
+  // RESTORE. The values above are synthetic but entirely plausible - 23% with
+  // a 1h21m countdown reads exactly like a real quota - and the device merges,
+  // so they sit on the glass until something overwrites them. That can be
+  // minutes, and in the meantime the device looks simply wrong.
+  if (display.ok) {
+    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }] };
+    const q = readCachedQuota();
+    if (q) {
+      restore.gauge1 = { label: '5h reset', pct: Math.round(q.pct * 10) / 10 };
+      if (q.resetAt) restore.row = { left: fmtUntil(q.resetAt) };
+    }
+    push(restore);
+    console.log('');
+    if (q) ok('test values cleared; the quota gauge is real again');
+    else   warn('test values cleared, but there is no cached quota to restore');
+    note('the context gauge and the header still hold doctor\'s values —');
+    note('the next statusline render corrects them');
   }
 }
 

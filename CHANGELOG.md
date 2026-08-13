@@ -7,6 +7,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-08-13
+
+### Fixed
+- **`doctor` left its synthetic test values on the display.** It pushes
+  `23%` with a `1h21m` countdown to prove the display path works — figures that
+  read exactly like a real quota — and because the device merges, they stayed on
+  the glass until something overwrote them. That can be minutes, during which
+  the device is confidently showing a number that is simply false, and the
+  natural conclusion is that the quota feed is broken. `doctor` now restores the
+  quota gauge from the cache and clears the test banner before it exits, and
+  says plainly which fields it could not restore.
+
+### Notes
+- The same class of mistake is worth avoiding when testing by hand: any script
+  run against your real home directory will write whatever it is given into
+  `~/.clauled-quota.json`, because a payload's `rate_limits` is cached by
+  design. `selftest` is isolated from `$HOME` for exactly this reason — ad-hoc
+  verification is not.
+
 ## [3.1.0] - 2026-08-13
 
 Works on macOS. Needs no credential. Pairs with Clauled firmware v3.1.0.
