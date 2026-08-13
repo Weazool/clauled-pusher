@@ -1,7 +1,7 @@
 {
   "name": "clauled-pusher",
   "description": "Pushes Claude Code usage and attention events to a Clauled ESP32 desk display over USB serial",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": {
     "name": "Weazool"
   },

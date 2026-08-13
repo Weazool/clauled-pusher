@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Claude Code hook command: pushes an event to the Clauled device.
+// Claude Code hook command: pushes an attention banner to the Clauled device.
 //
 //   node event.mjs stop           - Claude finished its turn, your move
 //   node event.mjs notification   - Claude wants permission or input
 //
-// Hooks block the session while they run, so this must stay fast. push() is
-// capped by config.timeoutMs (default 1s) and never throws.
+// The banner is inverted on the device - the loudest thing on the screen - and
+// supersedes the spinner. Both events also clear the busy state, since the turn
+// is over either way.
 
 import { readStdin, debugLog, push } from './clauled.mjs';
 
@@ -22,20 +23,19 @@ try {
 }
 
 const DEFAULTS = {
-  stop: { type: 'attention', text: 'Claude finished - your turn' },
-  notification: { type: 'attention', text: 'Claude needs input' },
-  sessionstart: { type: 'session', text: 'Claude Code session started' },
+  stop: 'Your turn',
+  notification: 'Claude needs input',
 };
 
-const event = DEFAULTS[kind] ?? { type: kind, text: 'Claude event' };
+let text = DEFAULTS[kind] ?? 'Claude event';
 
 // Notification payloads may carry their own message; prefer it when present.
-// The device truncates to 40 chars anyway, so trim here to keep the wire small.
 if (typeof payload.message === 'string' && payload.message.trim()) {
-  event.text = payload.message.trim().slice(0, 40);
+  text = payload.message.trim().slice(0, 21);
 }
 
-await push({ v: 1, events: [event] });
+// busy:"" ends the spinner in the same push that raises the banner.
+await push({ v: 3, busy: '', events: [{ type: kind, text }] });
 
 // Hooks must exit 0. A failed push is not a reason to disrupt the session.
 process.exit(0);

@@ -7,6 +7,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-13
+
+Real data at last. Requires Clauled firmware v3.0.0.
+
+### Changed — breaking
+- Emits the v3 labelled-field schema (`gauge1`, `gauge2`, `row`, `footer`,
+  `title`, `busy`) instead of fixed usage buckets.
+
+### Added
+- **Context gauge**, computed from the session transcript: the newest
+  `message.usage` block over `context_window_size`. Only the last 256 KB of the
+  transcript is read, so it stays fast on multi-megabyte files.
+- **Activity reporting.** A `UserPromptSubmit` hook shows a gerund while Claude
+  thinks; a `PreToolUse` hook shows the actual activity, including the file
+  being edited. `Stop` raises a `Your turn` banner and clears the spinner.
+- **Model and effort in the header**, e.g. `Opus 5 med`.
+- **Optional 5h subscription gauge**, off by default. Needs an OAuth token in
+  `~/.clauled.json`; without one the gauge shows `--` and nothing else changes.
+  Cached for five minutes and refreshed by a detached child process, so the
+  statusline never waits on the network.
+
+### Fixed
+- The status probe no longer resets the device. .NET's `SerialPort` raises
+  DTR/RTS on `Open()`, rebooting the ESP32-C3 and wiping the state being read —
+  `doctor` reported `last_push_age=-1` regardless of what had just been pushed.
+- Debug capture can be enabled from config (`"debug": true`) rather than only an
+  environment variable, so it takes effect without restarting Claude Code.
+
+### Notes on what Claude Code exposes
+Verified against v2.1.231 by capturing live payloads:
+- **No `rate_limits` anywhere.** Not in the statusline payload, not in the
+  transcript. Subscription limits exist only behind an authenticated API call.
+  The previous release's `extractUsage()` targeted a field that does not exist
+  and would have silently pushed nothing.
+- **`context_window` in the payload is always zero** — `total_input_tokens`,
+  `used_percentage` and `remaining_percentage` never populate.
+- The token in `~/.claude/.credentials.json` may be an empty string on some
+  setups, with only metadata left behind, so it is a fallback rather than the
+  primary source.
+
 ## [2.0.0] - 2026-08-13
 
 Transport moved from HTTP to USB serial, matching Clauled firmware v2.0.0.

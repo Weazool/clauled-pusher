@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // Claude Code statusline command.
 //
-// Reads the statusline payload on stdin, pushes any rate-limit figures to the
-// Clauled device, and prints a short status string back to Claude Code.
+// Builds the device's display from the statusline payload and pushes it over
+// USB serial, then prints a short status string back to Claude Code.
 //
-// The statusline is the ONLY source of rate-limit data that does not require an
-// API token - hooks do not receive it. That is why usage lives here and events
-// live in event.mjs.
+// Two independent feeds:
+//   5h quota  - from a background-refreshed cache (needs an API call)
+//   context   - computed live from the session transcript
+//
+// Neither blocks: the quota refresh runs detached, and a missing feed leaves
+// its gauge at "--" rather than blanking the screen.
 
-import { readStdin, debugLog, extractUsage, push } from './clauled.mjs';
+import { readStdin, debugLog, buildDisplay, push } from './clauled.mjs';
 
 const raw = await readStdin();
 debugLog('statusline', raw);
@@ -20,20 +23,18 @@ try {
   /* a malformed payload still has to print a statusline */
 }
 
-const usage = extractUsage(payload);
+const display = buildDisplay(payload);
 
-if (usage) {
-  // Deliberately not awaited for its result beyond completion: push() already
-  // caps itself with a timeout and never rejects.
-  await push({ v: 1, usage });
-}
+const hasSomething =
+  display.title || (display.gauge1?.pct >= 0) || (display.gauge2?.pct >= 0);
+if (hasSomething) await push(display);
 
-const fh = usage?.five_hour?.pct;
-const sd = usage?.seven_day?.pct;
+const q = display.gauge1?.pct;
+const c = display.gauge2?.pct;
 
 const parts = [];
-if (fh != null) parts.push(`5h ${Math.round(fh)}%`);
-if (sd != null) parts.push(`7d ${Math.round(sd)}%`);
+if (q >= 0) parts.push(`5h ${Math.round(q)}%`);
+if (c >= 0) parts.push(`ctx ${Math.round(c)}%`);
 
 // Printing nothing would blank the user's statusline, so always emit something.
-process.stdout.write(parts.length ? parts.join('  ') : 'clauled: no usage data');
+process.stdout.write(parts.length ? parts.join('  ') : 'clauled');

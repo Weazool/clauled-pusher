@@ -7,7 +7,7 @@
 // Run this before blaming Claude Code - it isolates "device not reachable"
 // from "the hook never fired", which are very different problems.
 
-import { findPort, probeStatus, push, loadConfig } from './clauled.mjs';
+import { findPort, probeStatus, push, loadConfig, readCachedQuota } from './clauled.mjs';
 
 let failures = 0;
 const ok  = (m) => console.log(`  ok    ${m}`);
@@ -47,14 +47,31 @@ if (port) {
 
   // 3. Push paths
   console.log('\npush');
-  const usage = push({ v: 1, usage: { five_hour: { pct: 42, resets_in: 3600 } } });
-  if (usage.ok) ok('usage push written'); else bad(`usage push failed (${usage.reason})`);
+  const display = push({
+    v: 3,
+    title: 'doctor',
+    gauge1: { label: '5h session', pct: 23 },
+    gauge2: { label: 'Context', pct: 42 },
+    row: { left: '1h21m', right: '420k/1M' },
+    footer: { left: '$0.00' },
+  });
+  if (display.ok) ok('display push written'); else bad(`display push failed (${display.reason})`);
 
-  const event = push({ v: 1, events: [{ type: 'attention', text: 'doctor test event' }] });
+  const event = push({ v: 3, busy: '', events: [{ type: 'attention', text: 'doctor test' }] });
   if (event.ok) ok('event push written'); else bad(`event push failed (${event.reason})`);
 
-  if (usage.ok && event.ok) {
-    console.log('        the display should now show 42% on the session bar');
+  if (display.ok && event.ok) {
+    console.log('        the screen should show two gauges and a test banner');
+  }
+
+  // 4. Quota feed - optional, and its absence must not read as a failure.
+  console.log('\n5h quota feed');
+  const q = readCachedQuota();
+  if (q) {
+    ok(`cached: ${q.pct.toFixed(1)}%${q.stale ? ' (stale, refreshing)' : ''}`);
+  } else {
+    console.log('  --    not configured - gauge 1 shows "--"');
+    console.log('        needs an OAuth token; see the README. Everything else works without it.');
   }
 }
 

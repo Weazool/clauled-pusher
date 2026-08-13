@@ -6,10 +6,11 @@
 // Nothing here may throw or hang: these run inside Claude Code's statusline and
 // hook paths, where a slow script is felt as UI lag on every turn.
 
-import { readFileSync, writeFileSync, appendFileSync, openSync, writeSync, closeSync, existsSync, readdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, appendFileSync, openSync, writeSync, readSync, closeSync, fstatSync, existsSync, readdirSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir, platform } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CONFIG_PATH = join(homedir(), '.clauled.json');
 const CACHE_PATH  = join(homedir(), '.clauled-port');
@@ -19,7 +20,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;  // re-scan at most every 5 minutes
 
 /** Optional. Only needed to override auto-detection or turn on debug capture. */
 export function loadConfig() {
-  const cfg = { port: '', debug: false };
+  const cfg = { port: '', debug: false, token: '' };
   try {
     Object.assign(cfg, JSON.parse(readFileSync(CONFIG_PATH, 'utf8')));
   } catch { /* absent is the normal case */ }
@@ -172,7 +173,7 @@ export function probeStatus() {
   if (platform() !== 'win32') {
     // Reading a tty from Node without a native module is unreliable; a
     // successful write is the best signal available here.
-    const r = push({ v: 1, cmd: 'status' });
+    const r = push({ v: 3, cmd: 'status' });
     return r.ok ? { ok: true, port: path, note: 'write-only probe' } : r;
   }
 
@@ -190,7 +191,7 @@ $p.ReadTimeout = 2500
 $p.Open()
 Start-Sleep -Milliseconds 400
 $p.DiscardInBuffer()
-$p.WriteLine('{"v":1,"cmd":"status"}')
+$p.WriteLine('{"v":3,"cmd":"status"}')
 Start-Sleep -Milliseconds 700
 $out = $p.ReadExisting()
 $p.Close()
@@ -210,66 +211,225 @@ foreach ($l in ($out -split "\`r?\`n")) { if ($l.Trim().StartsWith('{')) { Write
   }
 }
 
-// ── Usage extraction (unchanged by the transport switch) ──────
+// ── 5h subscription quota ─────────────────────────────────────
+//
+// Claude Code does not expose subscription limits anywhere locally - not in the
+// statusline payload, not in the transcript. The only source is the
+// anthropic-ratelimit-unified-5h-* response headers, which need an
+// authenticated call.
+//
+// The token is read from the credentials file Claude Code already maintains and
+// refreshes. Nothing is created, copied or stored, and it never reaches the
+// device.
 
-function num(v) {
-  const n = typeof v === 'string' ? Number(v) : v;
-  return Number.isFinite(n) ? n : null;
-}
+const QUOTA_CACHE  = join(homedir(), '.clauled-quota.json');
+const CREDS_PATH   = join(homedir(), '.claude', '.credentials.json');
+const QUOTA_TTL_MS = 5 * 60 * 1000;
 
-/**
- * Accepts epoch seconds, epoch milliseconds, or an ISO-8601 string, and returns
- * seconds remaining. The device has no clock, so the contract wants a duration.
- */
-export function toSecondsRemaining(v) {
-  if (v == null) return null;
-  let ms = null;
-  if (typeof v === 'number') {
-    ms = v > 1e12 ? v : v * 1000;
-  } else if (typeof v === 'string') {
-    const n = Number(v);
-    if (Number.isFinite(n)) ms = n > 1e12 ? n : n * 1000;
-    else {
-      const parsed = Date.parse(v);
-      ms = Number.isNaN(parsed) ? null : parsed;
-    }
+function readToken() {
+  // An explicit token wins. On some setups Claude Code no longer keeps the
+  // real token in the credentials file - it leaves the keys present but empty -
+  // so the file is a fallback, not the primary source.
+  const cfg = loadConfig();
+  if (cfg.token) return cfg.token;
+  if (process.env.CLAULED_TOKEN) return process.env.CLAULED_TOKEN;
+  try {
+    const j = JSON.parse(readFileSync(CREDS_PATH, 'utf8'));
+    const o = j.claudeAiOauth || j;
+    return o.accessToken || '';
+  } catch {
+    return '';
   }
-  if (ms == null) return null;
-  const secs = Math.round((ms - Date.now()) / 1000);
-  return secs > 0 ? secs : 0;
+}
+
+/** Whatever is on disk, however old. Never blocks. */
+export function readCachedQuota() {
+  try {
+    const c = JSON.parse(readFileSync(QUOTA_CACHE, 'utf8'));
+    return { ...c.data, ageMs: Date.now() - c.at, stale: Date.now() - c.at > QUOTA_TTL_MS };
+  } catch {
+    return null;
+  }
+}
+
+/** Does the actual API call. Run from refresh-quota.mjs, never inline. */
+export async function refreshQuota() {
+  const token = readToken();
+  if (!token) return { ok: false, reason: 'no token in ~/.claude/.credentials.json' };
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        authorization: `Bearer ${token}`,
+      },
+      // Smallest possible request: the body is irrelevant, only the headers matter.
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: '.' }],
+      }),
+      signal: ctrl.signal,
+    });
+
+    const util = parseFloat(res.headers.get('anthropic-ratelimit-unified-5h-utilization') ?? '');
+    const reset = parseInt(res.headers.get('anthropic-ratelimit-unified-5h-reset') ?? '', 10);
+
+    if (!Number.isFinite(util)) {
+      return { ok: false, reason: `no rate-limit headers (HTTP ${res.status})`, status: res.status };
+    }
+
+    const data = {
+      pct: Math.max(0, Math.min(100, util * 100)),
+      resetAt: Number.isFinite(reset) ? reset : null,
+    };
+    try { writeFileSync(QUOTA_CACHE, JSON.stringify({ at: Date.now(), data })); } catch {}
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, reason: err?.name === 'AbortError' ? 'timeout' : (err?.message ?? 'error') };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
- * Pull usage out of a statusline payload.
- *
- * NOTE: the exact field names Claude Code emits are not confirmed. This reads
- * several plausible spellings so it keeps working if they differ from what the
- * docs describe. Run with CLAULED_DEBUG=1 to capture the real shape.
+ * Kick off a refresh in a detached child if the cache is stale, and return
+ * immediately. The statusline must never wait on a network call.
  */
-export function extractUsage(d) {
-  const rl = d?.rate_limits ?? d?.rateLimits ?? d?.usage ?? null;
-  if (!rl || typeof rl !== 'object') return null;
+export function maybeRefreshQuota() {
+  const cached = readCachedQuota();
+  if (cached && !cached.stale) return;
+  try {
+    const script = join(dirname(fileURLToPath(import.meta.url)), 'refresh-quota.mjs');
+    const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
+    child.unref();
+  } catch { /* a failed refresh just leaves the gauge showing the old value */ }
+}
 
-  const pick = (o) => {
-    if (!o || typeof o !== 'object') return null;
-    const pct = num(o.used_percentage ?? o.usedPercentage ?? o.utilization ?? o.pct);
-    const resetsIn = toSecondsRemaining(
-      o.resets_at ?? o.resetsAt ?? o.reset_at ?? o.resets_in ?? null,
-    );
-    if (pct == null && resetsIn == null) return null;
-    const m = {};
-    if (pct != null) m.pct = Math.max(0, Math.min(100, pct));
-    if (resetsIn != null) m.resets_in = resetsIn;
-    return m;
+// ── Building the display payload ──────────────────────────────
+//
+// Claude Code's statusline payload does NOT carry subscription rate limits -
+// verified against v2.1.231, and they are absent from the transcript too. The
+// context_window figures in the payload are also always zero. What IS real is
+// the per-message usage block written to the transcript, so context occupancy
+// is computed from there.
+
+/**
+ * Read the newest usage block from a transcript. Only the tail is read - these
+ * files reach multiple megabytes and this runs on every statusline render.
+ */
+export function readTranscriptUsage(path) {
+  if (!path) return null;
+  let text = '';
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const { size } = fstatSync(fd);
+      const want = Math.min(size, 256 * 1024);
+      const buf = Buffer.alloc(want);
+      readSync(fd, buf, 0, want, Math.max(0, size - want));
+      text = buf.toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+
+  const lines = text.split('\n');
+  // Walk backwards: the first line may be a partial record, which simply fails
+  // to parse and is skipped.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i].trim();
+    if (!l.startsWith('{')) continue;
+    let u;
+    try { u = JSON.parse(l)?.message?.usage; } catch { continue; }
+    if (!u) continue;
+    const used =
+      (u.input_tokens || 0) +
+      (u.cache_read_input_tokens || 0) +
+      (u.cache_creation_input_tokens || 0);
+    if (used > 0) return { used, output: u.output_tokens || 0 };
+  }
+  return null;
+}
+
+export function fmtTokens(n) {
+  if (n >= 1e6) return (Math.round(n / 1e5) / 10).toString().replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+  return String(Math.round(n));
+}
+
+export function fmtDuration(ms) {
+  const s = Math.floor((ms || 0) / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+}
+
+const EFFORT_SHORT = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhi', max: 'max' };
+
+/** Header right-hand side: model plus effort, e.g. "Opus 5 med". */
+export function buildTitle(d) {
+  const model = (d?.model?.display_name || d?.model?.id || '')
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .trim();
+  const effort = EFFORT_SHORT[d?.effort?.level] ?? '';
+  return [model, effort].filter(Boolean).join(' ').slice(0, 14);
+}
+
+/** "1h21m" until an absolute epoch, for the 5h reset countdown. */
+export function fmtUntil(epochSec) {
+  if (!epochSec) return '';
+  const s = Math.max(0, Math.round(epochSec - Date.now() / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return `${h}h${m}m`;
+  if (m > 0) return `${m}m`;
+  return 'now';
+}
+
+/**
+ * Turn a Claude Code statusline payload into the device's display schema.
+ *
+ * Gauge 1 is the 5h subscription quota, which only exists behind an
+ * authenticated API call, so it comes from a cache refreshed in the background.
+ * Gauge 2 is context occupancy, computed from the transcript on every render.
+ * One feed failing must never blank the other.
+ */
+export function buildDisplay(d) {
+  const out = { v: 3 };
+
+  const title = buildTitle(d);
+  if (title) out.title = title;
+
+  // Gauge 1 - 5h quota (cached; refreshed detached when stale)
+  maybeRefreshQuota();
+  const quota = readCachedQuota();
+  out.gauge1 = { label: '5h session', pct: quota ? Math.round(quota.pct * 10) / 10 : -1 };
+
+  // Gauge 2 - context window (live from the transcript)
+  const size = d?.context_window?.context_window_size || 0;
+  const usage = readTranscriptUsage(d?.transcript_path);
+  const ctxPct = usage && size ? Math.min(100, (usage.used / size) * 100) : -1;
+  out.gauge2 = { label: 'Context', pct: ctxPct >= 0 ? Math.round(ctxPct * 10) / 10 : -1 };
+
+  // Detail row pairs each gauge with its most useful companion number.
+  out.row = {
+    left: quota ? fmtUntil(quota.resetAt) : '',
+    right: usage && size ? `${fmtTokens(usage.used)}/${fmtTokens(size)}` : '',
   };
 
-  const usage = {};
-  const fh = pick(rl.five_hour ?? rl.fiveHour ?? rl['5h']);
-  const sd = pick(rl.seven_day ?? rl.sevenDay ?? rl['7d']);
-  const sn = pick(rl.seven_day_sonnet ?? rl.sevenDaySonnet ?? rl['7d_sonnet']);
-  if (fh) usage.five_hour = fh;
-  if (sd) usage.seven_day = sd;
-  if (sn) usage.seven_day_sonnet = sn;
+  const cost = d?.cost || {};
+  out.footer = {
+    left: typeof cost.total_cost_usd === 'number' ? '$' + cost.total_cost_usd.toFixed(2) : '',
+  };
 
-  return Object.keys(usage).length ? usage : null;
+  return out;
 }

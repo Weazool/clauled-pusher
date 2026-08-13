@@ -1,7 +1,9 @@
 {
-  "_comment": "Optional. Only needed to override auto-detection - the device is normally found by its Espressif USB vendor ID (303A). Copy to ~/.clauled.json if you need it.",
-  "_windows": "COM8",
-  "_linux": "/dev/ttyACM0",
-  "_macos": "/dev/cu.usbmodem14201",
-  "port": ""
+  "_comment": "All optional. Copy to ~/.clauled.json only if you need one of these.",
+  "_port": "Override device auto-detection. Windows COM8, Linux /dev/ttyACM0, macOS /dev/cu.usbmodem*",
+  "port": "",
+  "_debug": "Capture raw statusline and hook payloads to ~/.clauled-debug.log",
+  "debug": false,
+  "_token": "OAuth token from 'claude setup-token'. Enables the 5h subscription gauge. Without it that gauge shows --",
+  "token": ""
 }

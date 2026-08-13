@@ -7,11 +7,11 @@ Claude Code ──statusline──▶ usage %       ┐
             ──Stop/Notification hooks──▶ events  ├──▶ JSON lines over USB ──▶ Clauled ──▶ OLED
 ```
 
-No credentials anywhere in the system. The device holds none, and this plugin holds none — usage comes from data Claude Code already hands its statusline.
+The device holds no credentials of any kind. The plugin needs none either, unless you opt into the 5h subscription gauge — see below.
 
 ## Requirements
 
-- A Clauled device on USB, running v2.0.0 or later
+- A Clauled device on USB, running v3.0.0 or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -44,7 +44,7 @@ That checks port discovery, does a round-trip status probe, and sends test pushe
 }
 ```
 
-The statusline prints `5h 23%  7d 41%` back to Claude Code, so it replaces whatever status line you currently have. If you already have one, merge the two rather than overwriting.
+The statusline prints `5h 23%  ctx 74%` back to Claude Code, so it replaces whatever status line you currently have. If you already have one, merge the two rather than overwriting.
 
 Events need no manual step — the `Stop` and `Notification` hooks ship inside the plugin.
 
@@ -54,25 +54,53 @@ The device is found by its Espressif USB vendor ID (`303A`), not by a hardcoded 
 
 Discovery is cached for five minutes so the statusline does not pay for a scan on every render. If a write fails, the port is re-detected immediately and the push retried once, so replugging recovers by itself without waiting for the cache to expire.
 
-You only need `~/.clauled.json` if you want to override detection:
+You only need `~/.clauled.json` to override detection or enable optional features:
 
 ```json
-{ "port": "COM8" }
+{ "port": "COM8", "debug": false, "token": "" }
 ```
 
-`CLAULED_PORT` in the environment overrides both.
+`CLAULED_PORT`, `CLAULED_DEBUG` and `CLAULED_TOKEN` in the environment override the file.
 
 ## What gets pushed
 
-| Source | Trigger | Payload |
+| Source | Hook / trigger | Shows on the device |
 |---|---|---|
-| statusline | Every statusline render | `usage` — 5h / 7d percentages and reset countdowns |
-| `Stop` hook | Claude finished its turn | `{"type":"attention","text":"Claude finished - your turn"}` |
-| `Notification` hook | Claude wants permission or input | `{"type":"attention","text":"Claude needs input"}` |
+| statusline | every render | both gauges, header, detail row, cost |
+| `UserPromptSubmit` | you hit enter | spinner with a gerund — `Discombobulating` |
+| `PreToolUse` | before each tool | spinner with the activity — `Running Bash`, `Editing main.cpp` |
+| `Stop` | Claude finished | inverted banner — `Your turn` |
+| `Notification` | needs permission or input | inverted banner — `Claude needs input` |
 
-`Stop` and `Notification` are the two events that mean "Claude is asking me something". `UserPromptSubmit` would be wrong — it fires when *you* submit, i.e. when you are already at the keyboard.
+`Stop` and `Notification` are the events that mean "Claude is asking me something". `UserPromptSubmit` would be wrong for that — it fires when *you* submit, i.e. when you are already at the keyboard.
 
-The device merges pushes, so an events-only push never wipes the usage bars.
+The device merges pushes, so a hook sending only `busy` never wipes the gauges, and the statusline never clears the spinner.
+
+**The gerunds are ours, not Claude Code's.** Its real spinner vocabulary is not exposed to hooks, so these are in the same spirit but will not match your terminal.
+
+## The two gauges
+
+They come from different places and fail independently.
+
+**Context** — computed from the session transcript on every render. Sums `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` from the newest `message.usage` block, over `context_window_size`. Free, live, no credentials. Only the last 256 KB of the transcript is read, so it stays fast on multi-megabyte files.
+
+**5h subscription quota** — needs an authenticated API call, and is **off by default**. Claude Code exposes subscription limits nowhere locally: not in the statusline payload, not in the transcript. The only source is the `anthropic-ratelimit-unified-5h-*` response headers.
+
+Without a token, gauge 1 shows `--` and everything else works normally.
+
+To enable it, create a token and put it in `~/.clauled.json`:
+
+```bash
+claude setup-token
+```
+
+```json
+{ "token": "sk-ant-oat01-..." }
+```
+
+Be clear-eyed about that trade: it is a real credential with `user:inference` scope, valid for a year, sitting in a plaintext file in your home directory. It never reaches the device — but it is a genuine secret on your PC, and the device works fine without it.
+
+The quota is cached for five minutes and refreshed by a **detached** child process, so the statusline never waits on the network. One minimal API request per refresh, which consumes a sliver of the very quota it reports.
 
 ## Testing without the device
 
@@ -80,23 +108,19 @@ The device merges pushes, so an events-only push never wipes the usage bars.
 node bin/selftest.mjs
 ```
 
-Points `CLAULED_PORT` at a temp file, runs the real scripts, and asserts on the exact bytes they write. Verifies the `resets_at` → `resets_in` conversion, the alternate field-name handling, and that an unrecognised payload pushes nothing.
+Points `CLAULED_PORT` at a temp file, runs the real scripts against a synthetic transcript, and asserts on the exact bytes they write — context maths, the model-and-effort header, tool-name mapping, and that a garbage payload pushes nothing.
 
-## Known caveat: the statusline schema is unverified
+## What Claude Code actually sends
 
-Usage extraction reads the `rate_limits` object Claude Code passes to the statusline. **The exact field names have not been confirmed against a live payload** — they come from documentation, not observation.
+Verified against v2.1.231 by capturing live payloads. Worth recording, because it shaped the design:
 
-`extractUsage()` in `bin/clauled.mjs` therefore accepts several plausible spellings (`used_percentage`, `usedPercentage`, `utilization`, `pct`) and handles `resets_at` as epoch seconds, epoch milliseconds, or an ISO string. If the real shape differs from all of them, nothing is pushed and the statusline prints `clauled: no usage data`.
+- **There is no `rate_limits` object.** Subscription limits are not in the statusline payload, and not in the transcript either — every top-level key was enumerated. They exist only behind an authenticated API call.
+- **`context_window` in the payload is always zero.** `total_input_tokens`, `used_percentage` and `remaining_percentage` never populate, even on a session with real activity. The transcript is the usable source.
+- What *is* there: `transcript_path`, `model`, `effort`, `cost`, `workspace`, `session_id`, `version`.
 
-To capture the real payload:
+To capture payloads yourself, set `"debug": true` in `~/.clauled.json` — it takes effect on the very next render, with nothing to restart. Raw stdin from every statusline and hook invocation is appended to `~/.clauled-debug.log`.
 
-```bash
-CLAULED_DEBUG=1 claude
-```
-
-Every statusline and hook invocation appends its raw stdin to `~/.clauled-debug.log`. Read that, then tighten `extractUsage()` to match. **The log contains whatever Claude Code sends — check it before sharing.**
-
-Also note `rate_limits` is documented as appearing only for Pro/Max subscribers, and only after the first API response in a session.
+**That log contains whatever Claude Code sends, including file paths and prompts. Check it before sharing.**
 
 ## Why Node rather than shell scripts
 
@@ -110,7 +134,9 @@ On Windows, Claude Code runs hook commands through **CMD.exe**. `.sh` files don'
 
 **`no reply` from the status probe.** Another program is probably holding the port. Close `pio device monitor` or any serial terminal; only one process can own a COM port.
 
-**Statusline shows `clauled: no usage data`.** Either the payload has no `rate_limits` yet (it appears after the first API response), or the field names differ. Capture the payload with `CLAULED_DEBUG=1`.
+**Gauge 1 shows `--`.** No token configured, so the 5h figure is unavailable. Expected unless you opted in.
+
+**Gauge 2 shows `--`.** The transcript could not be read, or it has no usage blocks yet — normal in the first seconds of a fresh session.
 
 **Hooks never fire.** Confirm the plugin is enabled, then test the script directly:
 
