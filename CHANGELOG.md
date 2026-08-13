@@ -7,6 +7,77 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-08-13
+
+**The transport was silently losing most pushes.** Everything else here is
+downstream of that. Pairs with firmware v3.9.0.
+
+### Fixed
+- **Full-size pushes were being dropped on the floor, and reported as
+  written.** The device's USB CDC receive queue is 256 bytes on stock
+  arduino-esp32; a full display push is around 300. Measured against real
+  hardware: lines up to 261 bytes arrived, 301 bytes and up did not. The
+  write succeeds here — the bytes reach the OS — so `push()` correctly
+  returned `{ok:true}` for pushes the device never received. Two fixes on
+  this side, both of which also help against firmware that has not been
+  updated:
+  - **Long lines are written in 128-byte chunks** with a short pause between
+    them, so the device's queue is never overrun. Lines under 200 bytes (the
+    common case) are written in one go and pay nothing.
+  - **Every push now starts with a newline.** If a fragment is already
+    sitting in the device's line buffer — from a truncated write, a retried
+    write, or two concurrent sessions interleaving on the one port — the
+    leading newline terminates it so this push starts clean instead of being
+    appended to garbage and lost.
+
+  This is the root cause behind the symptoms that had been chased
+  separately: sessions missing from the roster, effort never showing, the
+  quota row stuck at `--`, the idle screen with no readings, and the display
+  going minutes without updating.
+
+### Fixed — and separately, four of the same shape
+
+A value written once that nothing ever re-derived; each showed up as a number
+or name that had stopped tracking reality.
+- **The weekly quota had no working source at all on a hooks-only setup.**
+  `refreshQuota()` parsed only the `anthropic-ratelimit-unified-5h-*`
+  headers, because this file — and the README, and API.md — all asserted
+  that no weekly equivalent existed. It does:
+  `anthropic-ratelimit-unified-7d-utilization` and `-7d-reset` are in the
+  same response and always have been. Verified against a live response, and
+  the reset epoch it returns matches the time the Claude app itself shows.
+  With the payload's `rate_limits` (statusline-only) being the sole other
+  source, the weekly gauge was permanently blank for anyone whose statusline
+  never renders — so the device never had a second value to alternate row 1
+  with, and correctly showed the 5h row alone.
+- **The 5h reading froze permanently once cached.** `buildDisplay()` called
+  `maybeRefreshQuota()` in an `else` — only when *nothing at all* was
+  cached. After the first write, `readQuota()` always returned that cached
+  object (truthy, however old), so the refresh never ran again and the only
+  other writer (a statusline payload) never fired either. Now refreshes
+  whenever the reading is missing **or stale**; `maybeRefreshQuota()` already
+  had its own staleness check and lock, so this costs nothing when warm.
+- **A model switched mid-session was never picked up.** `buildTitle()`
+  consulted the per-sid cache before the transcript, so once a session had
+  any cached model, nothing looked further — the footer kept naming a model
+  that had not run for hours. Precedence is now payload > transcript >
+  cache, and any fresher answer rewrites the cache. Pinned by a regression
+  test that fails against the old order.
+- **A dropped push could leave a session showing "working" after it
+  finished.** `push()` retried 3 times inside 75ms on a port collision.
+  Contention scales with concurrent sessions — every one fires a hook before
+  every tool call, all writing the same single serial port — and if the push
+  that gets dropped is Stop's `busy:''`, the spinner survives until its TTL.
+  Now 5 attempts with a longer, jittered backoff (~340ms worst case, and
+  only on a genuinely contended port). Firmware v3.9.0 halves that TTL as
+  the second half of the same fix.
+
+### Changed
+- **The transcript is read at most once per push.** Both the model and the
+  context gauge derive from it and each used to read it independently. One
+  read is cheaper on a file that reaches hundreds of KB, and it means the
+  two can never disagree about which message was newest.
+
 ## [3.7.0] - 2026-08-13
 
 Requires Clauled firmware **v3.8.0** for the invert-scope, flat rotation,

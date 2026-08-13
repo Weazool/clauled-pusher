@@ -85,7 +85,9 @@ The one thing this plugin does own per session: the **model cache**. Hook payloa
 
 Both are the same value for every session under this login — sent globally, not per-session.
 
-**5h and weekly (1w) quota** — from the payload's `rate_limits` block (`five_hour` and `seven_day`), no credential needed. Sent on some renders, not all, so the reading is cached. If the 5h figure never arrives, a token is a fallback — there is no token fallback for the weekly one:
+**5h and weekly (1w) quota** — from the payload's `rate_limits` block (`five_hour` and `seven_day`), no credential needed. Sent on some renders, not all, so the reading is cached.
+
+But only the **statusline** payload carries `rate_limits`, and some setups never invoke the statusline at all — in which case a token is the only way either figure ever appears. It covers **both**: the `anthropic-ratelimit-unified-5h-*` and `-7d-*` headers come back in the same response. A stale reading is refreshed in the background on any push, so the numbers keep tracking reality rather than freezing at whatever arrived first.
 
 ```bash
 claude setup-token
@@ -94,9 +96,11 @@ claude setup-token
 { "token": "sk-ant-oat01-..." }
 ```
 
-A real credential, `user:inference` scope, valid a year — `chmod 600` the file, and prefer going without.
+A real credential, `user:inference` scope, valid a year — `chmod 600` the file. Prefer going without **if** your statusline actually renders; if it doesn't, this is the only source of either gauge.
 
 **Context** — per-session, from the payload's `context_window` when present, else the session transcript.
+
+**Model** — per-session, from the payload when present, else the newest assistant message in the session transcript, else this session's own cached value. In that order: the transcript beats the cache so that switching models mid-session is picked up rather than pinned to whatever was seen first.
 
 ## Files this creates
 

@@ -208,15 +208,30 @@ function normalizePort(p) {
  * often and a scan costs over a second - measured at 1.2-1.4 s on Windows.
  * Pass force=true to bypass the cache after a failed write.
  */
+/**
+ * The port cache's current state, without deciding anything about it.
+ *
+ * `miss` distinguishes "we looked recently and there was no device" from
+ * "we have no idea" - push() needs that difference to avoid paying for an
+ * enumeration it already knows the answer to.
+ */
+function readPortCache() {
+  try {
+    const { path, at, miss } = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
+    if (Date.now() - at < (miss ? MISS_TTL_MS : CACHE_TTL_MS)) {
+      return { fresh: true, miss: !!miss, path: miss ? '' : (path || '') };
+    }
+  } catch { /* absent, unreadable, or a torn read - treat as no cache */ }
+  return { fresh: false, miss: false, path: '' };
+}
+
 export function findPort(force = false) {
   const cfg = loadConfig();
   if (cfg.port) return normalizePort(cfg.port);
 
   if (!force) {
-    try {
-      const { path, at, miss } = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
-      if (Date.now() - at < (miss ? MISS_TTL_MS : CACHE_TTL_MS)) return miss ? '' : (path || '');
-    } catch { /* no usable cache */ }
+    const c = readPortCache();
+    if (c.fresh) return c.path;
   }
 
   let path = '';
@@ -240,7 +255,28 @@ export function findPort(force = false) {
 // ── Transport ─────────────────────────────────────────────────
 
 function writeLine(path, line) {
-  const buf = Buffer.from(line, 'utf8');
+  // LEADING NEWLINE, ALWAYS.
+  //
+  // The device accumulates bytes into one line buffer until it sees a
+  // newline. Anything that leaves an unterminated fragment in there - a
+  // short write, a write that failed partway and got retried, or two of the
+  // several concurrent sessions writing this single port at the same instant
+  // and interleaving their bytes - poisons that buffer: the next push is
+  // appended to the fragment, the combined line fails to parse, and the push
+  // is lost. Worse, if the fragments accumulate past the device's 2048-byte
+  // cap it latches into an overflow state and discards EVERY line until it
+  // finally sees a newline, which can be minutes of pushes going nowhere.
+  //
+  // Observed live, not theoretical: with two sessions running, a round trip
+  // against the real device answered a well-formed 62-byte push with
+  // {"error":"line too long"}, and the display sat there stale while every
+  // push reported success. Sending a newline FIRST terminates whatever
+  // fragment is in there (it fails to parse on its own and is discarded,
+  // which is exactly what should happen to a fragment) so our JSON always
+  // starts on a clean line. One byte, and it makes every push
+  // self-synchronising rather than dependent on the last one having been
+  // clean.
+  const buf = Buffer.from('\n' + line, 'utf8');
 
   // Deliberately NOT 'w'. That flag is O_WRONLY|O_CREAT|O_TRUNC, so a wrong or
   // stale path does not fail - it CREATES A REGULAR FILE there, every push
@@ -254,14 +290,30 @@ function writeLine(path, line) {
     ? C.O_WRONLY
     : (C.O_WRONLY | C.O_NOCTTY | C.O_NONBLOCK);
 
+  // CHUNK LONG LINES.
+  //
+  // The device's USB CDC receive queue is small - 256 bytes on stock
+  // arduino-esp32, which is less than a full display push. Handing it the
+  // whole line at once overruns the queue and the tail is dropped on the
+  // floor: the write succeeds here, and the device never sees a complete
+  // line. Firmware v3.9.0+ raises its own buffer, but this plugin has to keep
+  // working against the firmware people already have flashed, so pace the
+  // write from this side too. Small lines (the common case - a status probe,
+  // a forget) are written in one go and pay nothing.
+  const CHUNK = 128;
+  const PACE_ABOVE = 200;
+  const paced = buf.length > PACE_ABOVE;
+
   const fd = openSync(path, flags);
   try {
     let off = 0;
     let spins = 0;
+    let sincePause = 0;
     while (off < buf.length) {
       let n;
       try {
-        n = writeSync(fd, buf, off, buf.length - off);
+        const want = paced ? Math.min(CHUNK, buf.length - off) : buf.length - off;
+        n = writeSync(fd, buf, off, want);
       } catch (err) {
         // O_NONBLOCK means a momentarily full CDC transmit buffer surfaces as
         // EAGAIN rather than a wait. Spin briefly, but bounded - 100 ms.
@@ -276,6 +328,14 @@ function writeLine(path, line) {
       // that fails to parse - an intermittent fault that looks like corruption.
       if (n <= 0) throw Object.assign(new Error('short write'), { code: 'EIO' });
       off += n;
+
+      // Give the device a moment to drain what it just got, so its receive
+      // queue never fills. It drains on every loop() pass, so this only has to
+      // outlast one frame of drawing.
+      if (paced && off < buf.length) {
+        sincePause += n;
+        if (sincePause >= CHUNK) { sleepSync(4); sincePause = 0; }
+      }
     }
   } finally {
     closeSync(fd);
@@ -317,11 +377,31 @@ export function push(body) {
   let reason = 'device not found';
   let rescanned = false;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Five attempts, not three, with a longer and JITTERED backoff on a port
+  // collision. Contention scales with how many sessions are open: every one
+  // of them fires a hook before every tool call, all writing to the same
+  // single port, and they collide in bursts. Three attempts inside 75ms was
+  // not enough headroom, and a dropped push is not cosmetic - if the one
+  // that gets dropped is Stop's `busy:''`, the session sits there showing
+  // "working" until the spinner's TTL expires, long after it finished.
+  // Jitter matters for the same reason it does anywhere else: without it,
+  // two hooks that collide once retry in lockstep and collide again.
+  // Worst case here is ~340ms, and only on a genuinely contended port.
+  for (let attempt = 0; attempt < 5; attempt++) {
     // Re-detect AT MOST ONCE per push. A scan costs over a second, and this
     // runs before every tool call - paying for it repeatedly turns an unplugged
     // device into what feels like Claude Code itself hanging.
-    const force = attempt > 0 && !rescanned && !BUSY.has(reason);
+    //
+    // ...and NOT AT ALL while a fresh cached miss says we already looked and
+    // found nothing. Without that second condition the miss cache bought
+    // nothing on this path: attempt 0 read the cached miss in under a
+    // millisecond, then attempt 1 forced a full enumeration anyway, so an
+    // unplugged device still cost ~2s of blocking WMI scan before EVERY tool
+    // call - measured at 2.0-2.1s per push with the device absent. The miss
+    // TTL (30s) is what bounds replug detection now: one scan per window
+    // instead of one per push.
+    const missKnown = readPortCache().miss;
+    const force = attempt > 0 && !rescanned && !BUSY.has(reason) && !missKnown;
     if (force) rescanned = true;
 
     const path = findPort(force);
@@ -336,7 +416,7 @@ export function push(body) {
     } catch (err) {
       reason = err?.code ?? err?.message ?? 'write failed';
       debugLog('push-error', `${path}: ${reason} (attempt ${attempt + 1})`);
-      if (BUSY.has(reason)) sleepSync(25 + attempt * 25);   // 75 ms worst case
+      if (BUSY.has(reason)) sleepSync(20 + attempt * 30 + Math.floor(Math.random() * 25));
     }
   }
   return { ok: false, reason };
@@ -488,12 +568,21 @@ foreach ($l in ($out -split "\`r?\`n")) { if ($l.Trim().StartsWith('{')) { Write
   return { ok: false, port: path, reason: lastReason };
 }
 
-// ── 5h subscription quota ─────────────────────────────────────
+// ── Subscription quota (5h and weekly) ────────────────────────
 //
-// Claude Code does not expose subscription limits anywhere locally - not in the
-// statusline payload, not in the transcript. The only source is the
-// anthropic-ratelimit-unified-5h-* response headers, which need an
-// authenticated call.
+// Two independent sources, either of which can supply BOTH figures:
+//
+//   1. The statusline payload's `rate_limits` block (five_hour / seven_day).
+//      Free, no credential. But only the STATUSLINE payload carries it, and
+//      not on every render - and some setups never invoke the statusline at
+//      all, in which case this source never fires.
+//   2. The anthropic-ratelimit-unified-{5h,7d}-* response headers, from one
+//      authenticated call. Needs a token.
+//
+// Earlier versions of this file claimed source 2 covered only the 5h figure.
+// It does not - the 7d headers sit in the same response and always have -
+// and believing otherwise left the weekly gauge permanently blank for anyone
+// relying on the token path.
 //
 // The token is read from the credentials file Claude Code already maintains and
 // refreshes. Nothing is created, copied or stored, and it never reaches the
@@ -580,14 +669,32 @@ export function readQuota(d) {
     const data = {
       pct: pct100(five.used_percentage),
       resetAt: Number.isFinite(five.resets_at) ? five.resets_at : null,
-      // Sent to the device as gauge3 (v3.7.0+), which alternates row 1
-      // between this and the 5h reading every few seconds.
-      week: week && Number.isFinite(week.used_percentage) ? pct100(week.used_percentage) : null,
-      weekResetAt: Number.isFinite(week?.resets_at) ? week.resets_at : null,
       source: 'payload',
     };
+
+    // Sent to the device as gauge3 (v3.7.0+), which alternates row 1 between
+    // this and the 5h reading. Same carry-forward rule refreshQuota() has, and
+    // for the same reason: a payload carrying five_hour but no usable
+    // seven_day must not blank a weekly reading already established by
+    // another source. Writing week:null here did exactly that, and because
+    // this path also re-stamps the cache as fresh, the stale-triggered
+    // refresh that would have restored it never ran.
+    if (week && Number.isFinite(week.used_percentage)) {
+      data.week = pct100(week.used_percentage);
+      data.weekResetAt = Number.isFinite(week.resets_at) ? week.resets_at : null;
+    } else {
+      const prev = readCachedQuota();
+      if (prev?.week != null) {
+        data.week = prev.week;
+        data.weekResetAt = prev.weekResetAt ?? null;
+      }
+    }
+
     cacheQuota(data);
-    return data;
+    // Return through the cache reader so `stale` is always computed - a value
+    // returned straight from here has no `stale` key, which read as
+    // "not stale" and suppressed the background refresh indefinitely.
+    return readCachedQuota() ?? data;
   }
   return readCachedQuota();
 }
@@ -599,7 +706,7 @@ export function readQuota(d) {
  * used to be documented here as always zero, and it is not. The transcript is
  * the fallback, which is what hooks and reduced payloads rely on.
  */
-export function readContext(d) {
+export function readContext(d, tx = undefined) {
   const cw = d?.context_window;
   const size = cw?.context_window_size || 0;
 
@@ -611,7 +718,7 @@ export function readContext(d) {
     if (used > 0) return { used, size };
   }
 
-  const u = readTranscriptUsage(d?.transcript_path);
+  const u = tx === undefined ? readTranscriptUsage(d?.transcript_path) : tx;
   // Without a stated window, 1M is the current default across Claude 5 models.
   if (u) return { used: u.used, size: size || 1_000_000 };
   return null;
@@ -644,27 +751,38 @@ export async function refreshQuota() {
     const util = parseFloat(res.headers.get('anthropic-ratelimit-unified-5h-utilization') ?? '');
     const reset = parseInt(res.headers.get('anthropic-ratelimit-unified-5h-reset') ?? '', 10);
 
+    // The WEEKLY figure comes from this same response. This file previously
+    // asserted, in several places, that no such header existed and that the
+    // payload's rate_limits block was the only weekly source - that was
+    // simply wrong, and it meant the weekly gauge stayed permanently empty
+    // on any setup whose statusline never renders (the payload being the
+    // only thing that carries rate_limits). Verified against a live
+    // response: 7d-reset matched the reset time shown in the Claude app.
+    const wUtil  = parseFloat(res.headers.get('anthropic-ratelimit-unified-7d-utilization') ?? '');
+    const wReset = parseInt(res.headers.get('anthropic-ratelimit-unified-7d-reset') ?? '', 10);
+
     if (!Number.isFinite(util)) {
       return { ok: false, reason: `no rate-limit headers (HTTP ${res.status})`, status: res.status };
     }
 
     const data = {
-      pct: Math.max(0, Math.min(100, util * 100)),
+      pct: pct100(util * 100),
       resetAt: Number.isFinite(reset) ? reset : null,
+      source: 'headers',
     };
 
-    // This call only ever learns the 5h figure - there is no weekly-quota
-    // equivalent header. Carry forward whatever a previous statusline payload
-    // already established for the weekly reading rather than silently drop
-    // it: writing {pct, resetAt} alone here would overwrite a cache that
-    // previously had week/weekResetAt, and nothing else ever repopulates them
-    // except a live payload's rate_limits.seven_day block - which, in a
-    // session that never renders a statusline, may not arrive again for a
-    // long time, if ever.
-    const prev = readCachedQuota();
-    if (prev?.week != null) {
-      data.week = prev.week;
-      data.weekResetAt = prev.weekResetAt ?? null;
+    if (Number.isFinite(wUtil)) {
+      data.week = pct100(wUtil * 100);
+      data.weekResetAt = Number.isFinite(wReset) ? wReset : null;
+    } else {
+      // No weekly header on this response. Carry forward whatever is already
+      // known rather than silently dropping it - writing {pct, resetAt} alone
+      // would overwrite a cache that previously had a weekly reading.
+      const prev = readCachedQuota();
+      if (prev?.week != null) {
+        data.week = prev.week;
+        data.weekResetAt = prev.weekResetAt ?? null;
+      }
     }
 
     try { writeFileSync(QUOTA_CACHE, JSON.stringify({ at: Date.now(), data })); } catch {}
@@ -812,46 +930,49 @@ function readModelCache() {
 /**
  * Footer left-hand side: the model alone, e.g. "Opus 5".
  *
- * Cached PER SESSION, not globally - only the statusline payload carries the
- * model, hook payloads carry effort but not model, so a hook needs somewhere
- * to recover it from. A single shared cache would leak session A's model
- * into session B's display the moment they run different models at once;
- * keying by sid keeps each session's own last-known model separate.
+ * Three sources, in strict freshness order - and the ORDER is the whole
+ * point:
+ *
+ *   1. `d.model` from the payload. Only the statusline carries it, so in a
+ *      hooks-only setup this is never available.
+ *   2. The newest assistant message in the transcript. Authoritative and
+ *      CURRENT - it is the model that actually produced the last message.
+ *   3. The per-sid cache, as a last resort.
+ *
+ * The cache is deliberately LAST, not second. Consulting it before the
+ * transcript is what made a mid-session model switch stick on the old name
+ * forever: the cache had a value, so nothing ever looked any further, and
+ * the footer kept naming a model that had not run for hours. Anything fresher
+ * than the cache overwrites it, so the cache self-corrects rather than
+ * pinning the first answer it ever saw.
+ *
+ * Cached PER SESSION, not globally - two concurrent sessions can genuinely be
+ * on different models, and a single shared cache would leak one into the
+ * other's display.
+ *
+ * `tx` is this push's already-read transcript, threaded in so a single push
+ * reads that file once rather than once here and once for the context gauge.
  */
-export function buildTitle(d) {
+export function buildTitle(d, tx = undefined) {
+  const sid = buildSid(d);
+
   let model = (d?.model?.display_name || d?.model?.id || '')
     .replace(/\s*\(.*?\)\s*/g, '')
     .replace(/^Claude\s+/i, '')     // it is a Claude device; saying so twice is waste
     .trim();
 
-  const sid = buildSid(d);
+  if (!model) {
+    const t = tx === undefined ? readTranscriptUsage(d?.transcript_path) : tx;
+    if (t?.model) model = friendlyModelName(t.model);
+  }
 
-  if (model) {
-    if (sid) {
-      const map = readModelCache();
-      if (map[sid] !== model) {
-        map[sid] = model;
-        try { writeFileSync(MODEL_CACHE, JSON.stringify(map)); } catch {}
-      }
-    }
-  } else if (sid) {
-    model = readModelCache()[sid] || '';
+  if (!model && sid) model = readModelCache()[sid] || '';
 
-    // The per-sid cache is only ever populated BY a statusline render - the
-    // one payload that carries d.model. Some environments never invoke the
-    // statusline at all (no terminal status bar to keep current), which would
-    // otherwise leave a session's footer permanently blank even once it has
-    // done real work. The transcript is a slower fallback - it needs at least
-    // one completed turn - but it is real data, from the same file
-    // readContext() already reads for the context gauge.
-    if (!model) {
-      const t = readTranscriptUsage(d?.transcript_path);
-      if (t?.model) {
-        model = friendlyModelName(t.model);
-        const map2 = readModelCache();
-        map2[sid] = model;
-        try { writeFileSync(MODEL_CACHE, JSON.stringify(map2)); } catch {}
-      }
+  if (model && sid) {
+    const map = readModelCache();
+    if (map[sid] !== model) {
+      map[sid] = model;
+      try { writeFileSync(MODEL_CACHE, JSON.stringify(map)); } catch {}
     }
   }
   return model.slice(0, 14);
@@ -910,15 +1031,27 @@ export function fmtUntil(epochSec) {
 }
 
 /**
- * Turn a Claude Code statusline payload into the device's display schema.
+ * Turn a Claude Code payload - statusline OR hook - into the device's
+ * display schema.
  *
- * Gauge 1 is the 5h subscription quota, which only exists behind an
- * authenticated API call, so it comes from a cache refreshed in the background.
- * Gauge 2 is context occupancy, computed from the transcript on every render.
- * One feed failing must never blank the other.
+ * EVERY push recomputes EVERYTHING it can, from whatever that trigger's
+ * payload provides, so the glass converges on the truth from any trigger
+ * rather than depending on one privileged source arriving. That matters most
+ * where the sources are uneven: only the statusline carries the model and
+ * `rate_limits`, and some setups never invoke the statusline at all, so
+ * every other field has a hook-reachable path too - the model and context
+ * from the transcript, the quota from the token refresh.
+ *
+ * One feed failing must never blank another.
  */
 export function buildDisplay(d) {
   const out = { v: 3 };
+
+  // Read the transcript AT MOST ONCE per push. Both the model and the context
+  // gauge derive from it, it can be hundreds of KB, and this runs on the UI
+  // path before every tool call. Reading it once also means the two can never
+  // disagree about which message was newest.
+  const tx = readTranscriptUsage(d?.transcript_path);
 
   // Which session this push belongs to - see buildSid(). Omitted (not sent
   // as an empty string) when unavailable; the device treats a missing sid
@@ -926,7 +1059,7 @@ export function buildDisplay(d) {
   const sid = buildSid(d);
   if (sid) out.sid = sid;
 
-  const title = buildTitle(d);
+  const title = buildTitle(d, tx);
   if (title) out.title = title;
 
   const session = buildSession(d);
@@ -955,7 +1088,17 @@ export function buildDisplay(d) {
   // at all, just send what is true right now.
   const quota = readQuota(d);
   if (quota) out.gauge1 = { label: '5h', pct: round1(quota.pct) };
-  else maybeRefreshQuota();   // only pay for the API when nothing cheaper has it
+
+  // Refresh when the reading is MISSING **or STALE**. This used to be an
+  // `else` - refresh only when nothing at all was cached - which quietly
+  // froze the gauge forever on any setup where the statusline never renders:
+  // the first reading got cached, readQuota() then always returned that
+  // cached object (truthy, however old), so this branch never ran again and
+  // the only other writer (a payload's rate_limits) never fired either. The
+  // number on the glass simply stopped tracking reality. maybeRefreshQuota()
+  // does its own staleness check and holds a lock, so calling it on every
+  // push costs nothing when the cache is warm.
+  if (!quota || quota.stale) maybeRefreshQuota();
 
   // The weekly (7-day, all models) reading rides on the same rate_limits
   // block as the 5h one - readQuota() already captures it, it just never had
@@ -968,7 +1111,7 @@ export function buildDisplay(d) {
     out.gauge3 = gauge3;
   }
 
-  const ctx = readContext(d);
+  const ctx = readContext(d, tx);
   if (ctx) out.gauge2 = { label: 'ctx', pct: round1(Math.min(100, (ctx.used / ctx.size) * 100)) };
 
   // Detail row pairs each gauge with its most useful companion number. Each

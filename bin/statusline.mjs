@@ -4,12 +4,15 @@
 // Builds the device's display from the statusline payload and pushes it over
 // USB serial, then prints a short status string back to Claude Code.
 //
-// Two independent feeds:
-//   5h quota  - from a background-refreshed cache (needs an API call)
-//   context   - computed live from the session transcript
+// Independent feeds, none of which blocks:
+//   quota (5h + weekly) - from the payload's own rate_limits when it carries
+//                         them, else a cache refreshed in a detached child
+//   context             - the payload's context_window, else the transcript
+//   model               - the payload, else the transcript, else a per-sid cache
 //
-// Neither blocks: the quota refresh runs detached, and a missing feed leaves
-// its gauge at "--" rather than blanking the screen.
+// A field that cannot be computed is OMITTED, never sent as a placeholder: the
+// device merges, so an omitted field keeps its last good value. "--" appears
+// only for a gauge the device has genuinely never received.
 
 import { readStdin, debugLog, buildDisplay, push } from './clauled.mjs';
 

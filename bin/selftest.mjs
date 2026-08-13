@@ -107,6 +107,11 @@ console.log('statusline');
 clearQuota();
 let r = await run('statusline.mjs', [], JSON.stringify(payload));
 check('wrote a line to the port', r.raw.endsWith('\n'));
+// Deliberate: a LEADING newline terminates any unterminated fragment already
+// sitting in the device's line buffer (a short write, a retried write, or two
+// concurrent sessions interleaving on the one port), so this push always
+// starts on a clean line instead of being appended to garbage and lost.
+check('every push starts with a newline, so a stray fragment cannot swallow it', r.raw.startsWith('\n'), JSON.stringify(r.raw.slice(0, 3)));
 check('schema v3', r.sent?.v === 3);
 // The actual value depends on the real clock the suite happens to run under,
 // so only the SHAPE is checked here - that it is always sent, never omitted,
@@ -254,6 +259,39 @@ r = await run('busy.mjs', ['tool'], JSON.stringify({
   tool_name: 'Read',
 }));
 check('and is now cached, so a later push with no transcript still has it', r.sent?.title === 'Sonnet 5', r.sent?.title);
+
+console.log('\na model switched mid-session is picked up, not pinned to the cache');
+// The regression this pins: the cache used to be consulted BEFORE the
+// transcript, so once a session had any cached model, nothing ever looked
+// further and switching models mid-session left the footer naming the old
+// one forever. Precedence is payload > transcript > cache, and every
+// fresher answer rewrites the cache.
+const SWITCHED = 'mmmm2222-0000-1111-2222-333344445555';
+r = await run('statusline.mjs', [], JSON.stringify({
+  session_id: SWITCHED,
+  model: { display_name: 'Haiku 4.5' },
+}));
+check('cache primed with the first model', r.sent?.title === 'Haiku 4.5', r.sent?.title);
+
+// Same session, but the transcript says a DIFFERENT model produced the newest
+// message. The transcript is current; the cache is stale. Transcript wins.
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  session_id: SWITCHED,
+  transcript_path: TRANSCRIPT,
+  tool_name: 'Bash',
+}));
+check('the switch is picked up from the transcript', r.sent?.title === 'Sonnet 5', r.sent?.title);
+
+r = await run('busy.mjs', ['tool'], JSON.stringify({ session_id: SWITCHED, tool_name: 'Read' }));
+check('and the refreshed model is what gets cached', r.sent?.title === 'Sonnet 5', r.sent?.title);
+
+// The payload, when there is one, is still the most authoritative source.
+r = await run('statusline.mjs', [], JSON.stringify({
+  session_id: SWITCHED,
+  transcript_path: TRANSCRIPT,          // says Sonnet 5
+  model: { display_name: 'Opus 5' },    // ...but the payload says Opus 5
+}));
+check('a live payload model still beats the transcript', r.sent?.title === 'Opus 5', r.sent?.title);
 
 r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'Bash' }));
 check('tool name becomes an activity', r.sent?.busy === 'Running Bash', r.sent?.busy);

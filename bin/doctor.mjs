@@ -84,6 +84,16 @@ if (port) {
     if (typeof s.sessions === 'number') {
       note(`sessions in the roster right now: ${s.sessions}${s.sessions > 1 ? ' - rotating every 6s' : ''}`);
     }
+    if (s.quota) {
+      // "not alternating" and "alternating but you looked twice at the same
+      // moment" are indistinguishable on the glass; the device says which.
+      const q5 = s.quota['5h'], q1w = s.quota['1w'];
+      note(`row 1: 5h=${q5 >= 0 ? q5 + '%' : '--'}  1w=${q1w >= 0 ? q1w + '%' : '--'}  showing ${s.quota.showing}`);
+      if (!s.quota.alternating) {
+        note('  not alternating - no weekly reading has reached the device, so the 5h row');
+        note('  shows alone. See the quota feed section below.');
+      }
+    }
     if (Array.isArray(s.roster) && s.roster.length) {
       for (const r of s.roster) {
         const bits = [r.sid || '(no sid)', r.name ? `"${r.name}"` : '(no name)', `pushed ${r.age}s ago`];
@@ -145,15 +155,23 @@ if (port) {
     const restore = {
       v: 3, sid: DOCTOR_SID, busy: '',
       events: [{ type: 'clear', text: '' }],
-      session: '', title: '',   // doctor was never a real session - nothing to restore this TO
+      session: '',   // doctor was never a real session - nothing to restore this TO
       quiet: isQuietHours(cfg),
     };
+    // Deliberately NOT `title: ''`. On the device an explicit empty title is
+    // still a title, and it is promoted into the account-level last-known
+    // model that every session's footer falls back to. The slot is deleted by
+    // the forget push below anyway, so there is nothing here worth clearing.
 
+    // gauge1 and row.left are ACCOUNT-LEVEL on the device, so the fakes above
+    // are not confined to doctor's own slot - they are what EVERY session
+    // shows. Restore them UNCONDITIONALLY: with no cached reading, `pct:-1`
+    // and an empty detail put the row back to an honest "--" rather than
+    // leaving a fabricated 23%/1h21m that nothing can ever correct (with no
+    // statusline and no token, no later push carries gauge1 at all).
     const q = readCachedQuota();
-    if (q) {
-      restore.gauge1 = { label: '5h', pct: Math.round(q.pct * 10) / 10 };
-      if (q.resetAt) restore.row = { left: fmtUntil(q.resetAt) };
-    }
+    restore.gauge1 = q ? { label: '5h', pct: Math.round(q.pct * 10) / 10 } : { pct: -1 };
+    restore.row = { left: q?.resetAt ? fmtUntil(q.resetAt) : '' };
     // gauge3 (the weekly reading) has no token fallback, so there may be
     // nothing real cached to restore it TO. pct:-1 tells the device to hide
     // the weekly row again (hasWeek goes false on the device) rather than
@@ -163,9 +181,11 @@ if (port) {
     // whose statusline never renders may be a very long time.
     if (q?.week != null) {
       restore.gauge3 = { label: '1w', pct: Math.round(q.week * 10) / 10 };
-      if (q.weekResetAt) restore.gauge3.reset = fmtUntil(q.weekResetAt);
+      restore.gauge3.reset = q.weekResetAt ? fmtUntil(q.weekResetAt) : '';
     } else {
-      restore.gauge3 = { pct: -1 };
+      // Hide the row AND clear the fake "3d4h" detail. Sending pct alone left
+      // that string latched, ready to be shown beside a real percentage later.
+      restore.gauge3 = { pct: -1, reset: '' };
     }
     sleepSync(150);
     const restored = push(restore);
@@ -185,7 +205,9 @@ if (port) {
       ok('test values cleared; 5h is real again');
       note('1w has no cached reading yet, so its test value was hidden rather than restored');
     } else {
-      warn('test values cleared, but there is no cached quota to restore');
+      ok('test values cleared - both gauges reset to "--"');
+      note('there is no cached quota to restore, so the row is blank rather than');
+      note('showing doctor\'s fabricated numbers');
     }
     note('the context gauge and effort corner still hold doctor\'s values —');
     note('the next statusline render or hook corrects them');
@@ -200,7 +222,11 @@ const q = readCachedQuota();
 if (q) {
   ok(`5h: ${q.pct.toFixed(1)}%${q.stale ? ' (stale, refreshing)' : ''}${q.source === 'payload' ? ' - from the statusline payload, no token needed' : ''}`);
   if (q.week != null) ok(`1w: ${q.week.toFixed(1)}% - alternates with the 5h row on the device every few seconds`);
-  else note('1w: not seen yet - only arrives via the payload\'s rate_limits block, no token fallback for it');
+  else {
+    note('1w: not seen yet - the device shows the 5h row alone until it arrives (no alternation)');
+    note('it comes from a statusline payload\'s rate_limits, or from the 7d rate-limit headers');
+    note(`on any authenticated refresh - ${tokenSourceHint()}`);
+  }
 } else {
   console.log('  --    no reading yet');
   note('Claude Code sends rate_limits on some statusline payloads; one will populate this');
