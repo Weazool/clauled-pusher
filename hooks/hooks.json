@@ -5,19 +5,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/busy.mjs\" prompt",
-            "async": true
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/busy.mjs\" prompt"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/busy.mjs\" tool",
-            "async": true
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/busy.mjs\" tool"
           }
         ]
       }
@@ -27,8 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/event.mjs\" stop",
-            "async": true
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/event.mjs\" stop"
           }
         ]
       }
@@ -38,8 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/event.mjs\" notification",
-            "async": true
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/event.mjs\" notification"
           }
         ]
       }
