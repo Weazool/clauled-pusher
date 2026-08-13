@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { isQuietHours } from './clauled.mjs';
 
 const BIN = dirname(fileURLToPath(import.meta.url));
 const TMP = mkdtempSync(join(tmpdir(), 'clauled-selftest-'));
@@ -70,6 +71,27 @@ const check = (name, cond, detail = '') => {
 
 console.log('\nclauled-pusher selftest\n');
 
+console.log('quiet hours');
+// Real wall-clock time would make this test flaky depending on when the suite
+// runs, so every case pins an explicit hour rather than relying on the
+// default (new Date().getHours()).
+check('2am is quiet under the default 0-6 window', isQuietHours({}, 2) === true);
+check('6am is NOT quiet - the window is end-exclusive', isQuietHours({}, 6) === false);
+check('11pm is not quiet under the default window', isQuietHours({}, 23) === false);
+check('midnight is quiet, the start boundary is inclusive', isQuietHours({}, 0) === true);
+check(
+  'a window that wraps past midnight (23-7) includes 11pm',
+  isQuietHours({ quietStart: 23, quietEnd: 7 }, 23) === true,
+);
+check(
+  'the same wrapping window includes 3am',
+  isQuietHours({ quietStart: 23, quietEnd: 7 }, 3) === true,
+);
+check(
+  'the same wrapping window excludes noon',
+  isQuietHours({ quietStart: 23, quietEnd: 7 }, 12) === false,
+);
+
 const payload = {
   transcript_path: TRANSCRIPT,
   model: { display_name: 'Opus 5 (1M context)' },
@@ -83,6 +105,10 @@ clearQuota();
 let r = await run('statusline.mjs', [], JSON.stringify(payload));
 check('wrote a line to the port', r.raw.endsWith('\n'));
 check('schema v3', r.sent?.v === 3);
+// The actual value depends on the real clock the suite happens to run under,
+// so only the SHAPE is checked here - that it is always sent, never omitted,
+// which is what lets the device clear a stale "true" once quiet hours end.
+check('quiet is always present as a boolean', typeof r.sent?.quiet === 'boolean', JSON.stringify(r.sent?.quiet));
 check('header carries the model alone', r.sent?.title === 'Opus 5', r.sent?.title);
 check('footer carries the effort spelled out', r.sent?.footer?.right === 'medium', r.sent?.footer?.right);
 check('header carries the session', r.sent?.session === 'proj', r.sent?.session);

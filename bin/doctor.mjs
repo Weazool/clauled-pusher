@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, buildTitle, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, buildTitle, isQuietHours, tokenSourceHint } from './clauled.mjs';
 
 let failures = 0;
 const ok   = (m) => console.log(`  ok    ${m}`);
@@ -49,6 +49,8 @@ if (cfg.configError) {
 } else {
   ok('no ~/.clauled.json - using defaults (this is the normal case)');
 }
+const quiet = isQuietHours(cfg);
+note(`quiet hours: ${cfg.quietStart ?? 0}:00-${cfg.quietEnd ?? 6}:00 local - currently ${quiet ? 'ON' : 'off'}`);
 
 // 2. Discovery
 console.log('\ndevice');
@@ -77,6 +79,10 @@ if (port) {
     if (s.display_ok === false) {
       note('note: display not detected - device runs headless, pushes still work');
     }
+    if (s.quiet_sleep) {
+      note('panel is currently OFF - quiet hours, idle past the threshold. This is');
+      note('correct behaviour, not a fault; the device wakes on the next push.');
+    }
   } else if (r.ok) {
     ok(`write succeeded (${r.note ?? 'no round trip on this platform'})`);
   } else {
@@ -90,6 +96,7 @@ if (port) {
     v: 3,
     session: 'doctor',
     title: 'test',
+    quiet,   // the real value - never fake this, it is a live state flag
     gauge1: { label: '5h reset', pct: 23 },
     gauge2: { label: 'ctx', pct: 42 },
     row: { left: '1h21m', right: '420k/1M' },
@@ -109,7 +116,7 @@ if (port) {
   // so they sit on the glass until something overwrites them. That can be
   // minutes, and in the meantime the device looks simply wrong.
   if (display.ok) {
-    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }], session: '' };
+    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }], session: '', quiet: isQuietHours(cfg) };
 
     // The model has a real cache of its own (~/.clauled-model), written by
     // whichever push last carried a real one. Restoring from it beats leaving

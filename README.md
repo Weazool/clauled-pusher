@@ -11,7 +11,7 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.4.0** or later
+- A Clauled device on USB, running **v3.5.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -69,10 +69,24 @@ Discovery is cached for five minutes, because a scan costs over a second. Misses
 You only need `~/.clauled.json` to override detection or enable optional behaviour:
 
 ```json
-{ "port": "", "debug": false, "token": "" }
+{ "port": "", "debug": false, "token": "", "quietStart": 0, "quietEnd": 6 }
 ```
 
 `CLAULED_PORT`, `CLAULED_DEBUG` and `CLAULED_TOKEN` override the file. A malformed config is reported by `doctor` rather than silently ignored.
+
+## Quiet hours
+
+The device has no clock — deliberately, see below — so it cannot know on its own whether it's currently the middle of the night. This plugin computes that from the machine's own local time and sends it on every push; the device only tracks how long it's been idle, and powers the panel fully off once both are true. Default window is midnight–6am, idle threshold 15 minutes, both overridable:
+
+```json
+{ "quietStart": 23, "quietEnd": 7 }
+```
+
+`quietEnd` is exclusive; a value less than or equal to `quietStart` wraps past midnight, so `23`/`7` means 11pm–7am. Requires Clauled firmware **v3.5.0**.
+
+**Any push wakes the device immediately**, regardless of what it contains — idle resets to zero the moment anything arrives, which is also why `quiet` is sent as a plain boolean on *every* push rather than only when true. The device only updates its own copy on an explicit value; sending `true` once and then omitting the field would leave the panel dark forever, well past 6am, because nothing would ever tell it otherwise.
+
+**This is best-effort, not exact**, in the same way the 5h countdown is: if Claude Code is fully closed for hours spanning the quiet-hours boundary, no push arrives to refresh the flag, and the device just keeps whatever it last received. That is the accepted cost of a device with no network stack and no wall clock, not a bug to chase.
 
 ### macOS notes
 
@@ -86,9 +100,9 @@ Always the `cu.*` node, never `tty.*`. The `tty.*` device is the dial-in side, a
 
 ## What gets pushed
 
-Every trigger below pushes the **full display** — session, model, effort, and
-both gauges — plus whatever that trigger exists to add. None of them send a
-partial update anymore:
+Every trigger below pushes the **full display** — session, model, effort,
+both gauges, and whether it's currently quiet hours — plus whatever that
+trigger exists to add. None of them send a partial update anymore:
 
 | Source | Trigger | Adds |
 |---|---|---|
@@ -178,6 +192,8 @@ It also avoids a quoting trap. `"C:/Program Files/nodejs/node.exe" script.mjs` r
 **Gauge 1 shows `--`.** No `rate_limits` seen yet. One will arrive on a later render; a token is only needed if it never does.
 
 **Gauge 2 shows `--`.** No transcript and no `context_window` yet — normal in the first seconds of a session.
+
+**The screen is completely dark, not even the sleeping face.** Run `doctor` — it reports the current quiet-hours computation and, from the device's own status probe, whether the panel is intentionally powered off (`quiet_sleep: true`). Any push wakes it.
 
 **Hooks never fire on macOS.** Most likely `node` is not on the `PATH` Claude Code inherited. `doctor` checks this. Launching Claude Code from a terminal is the quickest confirmation.
 

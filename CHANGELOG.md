@@ -7,6 +7,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-13
+
+Quiet hours. Requires Clauled firmware **v3.5.0** to act on `quiet` -
+against older firmware the field is simply ignored, same as any unrecognised
+key.
+
+### Added
+- **`isQuietHours()`**, computed from local system time and sent as a plain
+  boolean on every push via `buildDisplay()` - every trigger gets it for free,
+  the same way the v3.3.0 refactor gave every trigger the gauges for free.
+  Default window is 00:00-06:00; override with `quietStart`/`quietEnd` (0-23)
+  in `~/.clauled.json`. An end at or before start wraps past midnight, so
+  `23`/`7` means 11pm-7am.
+- `doctor` reports the current quiet-hours computation and, from the device's
+  own status probe, whether the panel is intentionally dark
+  (`quiet_sleep: true`) rather than unreachable.
+
+### Fixed
+- **`quiet` is sent unconditionally, true or false, never omitted** - the one
+  deliberate exception to "omit what you cannot compute." Everything else in
+  `buildDisplay()` is optional data that the device's merge semantics are
+  built to handle being absent; `quiet` is a state flag that must be
+  re-asserted every time; omitting it once it goes false would leave the
+  panel dark on the device long after quiet hours actually end, since the
+  device only updates on an explicit value.
+
 ## [3.3.0] - 2026-08-13
 
 Every hook push now recomputes the full display, not just the field it

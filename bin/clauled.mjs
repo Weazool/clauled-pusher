@@ -22,7 +22,7 @@ const MISS_TTL_MS  = 30 * 1000;      // ...but retry a miss sooner than that
 
 /** Optional. Only needed to override auto-detection or turn on debug capture. */
 export function loadConfig() {
-  const cfg = { port: '', debug: false, token: '', configError: '' };
+  const cfg = { port: '', debug: false, token: '', quietStart: 0, quietEnd: 6, configError: '' };
   let text = null;
   try { text = readFileSync(CONFIG_PATH, 'utf8'); } catch { /* absent is normal */ }
   if (text !== null) {
@@ -772,6 +772,24 @@ export function buildSession(d) {
   return base.slice(0, 14);
 }
 
+/**
+ * Is local time currently inside the configured quiet-hours window?
+ *
+ * The device has no clock of its own - deliberately; see the NTP removal in
+ * CHANGELOG v2.0.0 - so this has to be decided here, on the machine that
+ * actually knows what time it is, and sent as a plain boolean on every push.
+ * Default window is 00:00-06:00; override with "quietStart"/"quietEnd" (0-23)
+ * in ~/.clauled.json. end <= start wraps past midnight (e.g. 23-7).
+ *
+ * `hour` is only ever overridden by selftest - real callers take the default
+ * and get the actual current hour.
+ */
+export function isQuietHours(cfg = loadConfig(), hour = new Date().getHours()) {
+  const start = Number.isInteger(cfg.quietStart) ? cfg.quietStart : 0;
+  const end   = Number.isInteger(cfg.quietEnd)   ? cfg.quietEnd   : 6;
+  return start <= end ? (hour >= start && hour < end) : (hour >= start || hour < end);
+}
+
 /** "1h21m" until an absolute epoch, for the 5h reset countdown. */
 export function fmtUntil(epochSec) {
   if (!epochSec) return '';
@@ -799,6 +817,12 @@ export function buildDisplay(d) {
 
   const session = buildSession(d);
   if (session) out.session = session;
+
+  // Unlike everything else in here, this is sent EVERY time, true or false -
+  // never omitted. The device only updates quiet on an explicit value, so an
+  // omitted field would leave a stale "true" on the glass forever once quiet
+  // hours actually end.
+  out.quiet = isQuietHours();
 
   // NOTHING BELOW IS EMITTED UNLESS IT WAS ACTUALLY COMPUTED.
   //
