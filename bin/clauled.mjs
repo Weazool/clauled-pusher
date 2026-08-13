@@ -168,10 +168,15 @@ export function probeStatus() {
   const ps = `
 $ErrorActionPreference='Stop'
 $p = New-Object System.IO.Ports.SerialPort '${com}',115200,'None',8,'one'
+# Do NOT assert DTR/RTS. .NET raises them on Open() by default, which resets
+# the ESP32-C3 and wipes the very state we are trying to read - the probe
+# would report last_push_age=-1 no matter what had just been pushed.
+$p.DtrEnable = $false
+$p.RtsEnable = $false
 $p.NewLine = "\`n"
 $p.ReadTimeout = 2500
 $p.Open()
-Start-Sleep -Milliseconds 2600
+Start-Sleep -Milliseconds 400
 $p.DiscardInBuffer()
 $p.WriteLine('{"v":1,"cmd":"status"}')
 Start-Sleep -Milliseconds 700
