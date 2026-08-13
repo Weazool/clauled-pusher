@@ -835,9 +835,9 @@ export function buildDisplay(d) {
   const round1 = (n) => Math.round(n * 10) / 10;
 
   // Labels are short because the device composes them into a single 21-char
-  // line with the detail and the percentage: "5h reset 4h33m 55%".
+  // line with the detail and the percentage: "5h lim 4h33m 55%".
   const quota = readQuota(d);
-  if (quota) out.gauge1 = { label: '5h reset', pct: round1(quota.pct) };
+  if (quota) out.gauge1 = { label: '5h lim', pct: round1(quota.pct) };
   else maybeRefreshQuota();   // only pay for the API when nothing cheaper has it
 
   const ctx = readContext(d);

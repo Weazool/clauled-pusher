@@ -7,6 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-08-13
+
+Pairs with Clauled firmware **v3.6.0**, which makes a live banner invert the
+whole screen instead of just the status row - no change needed here for that,
+it's triggered by the same `events` field this plugin already sends.
+
+### Changed
+- **Gauge 1's label is now `5h lim`**, was `5h reset`. Two characters
+  shorter, so the composed line has more room before the middle column has to
+  nudge off centre.
+
 ## [3.4.0] - 2026-08-13
 
 Quiet hours. Requires Clauled firmware **v3.5.0** to act on `quiet` -

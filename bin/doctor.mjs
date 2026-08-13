@@ -97,7 +97,7 @@ if (port) {
     session: 'doctor',
     title: 'test',
     quiet,   // the real value - never fake this, it is a live state flag
-    gauge1: { label: '5h reset', pct: 23 },
+    gauge1: { label: '5h lim', pct: 23 },
     gauge2: { label: 'ctx', pct: 42 },
     row: { left: '1h21m', right: '420k/1M' },
     footer: { right: 'xhigh' },
@@ -126,7 +126,7 @@ if (port) {
 
     const q = readCachedQuota();
     if (q) {
-      restore.gauge1 = { label: '5h reset', pct: Math.round(q.pct * 10) / 10 };
+      restore.gauge1 = { label: '5h lim', pct: Math.round(q.pct * 10) / 10 };
       if (q.resetAt) restore.row = { left: fmtUntil(q.resetAt) };
     }
     push(restore);

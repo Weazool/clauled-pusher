@@ -131,7 +131,7 @@ r = await run('statusline.mjs', [], JSON.stringify({
     seven_day: { used_percentage: 21, resets_at: soon + 86_400 },
   },
 }));
-check('gauge1 labelled 5h reset', r.sent?.gauge1?.label === '5h reset');
+check('gauge1 labelled 5h lim', r.sent?.gauge1?.label === '5h lim');
 check('gauge1 comes from rate_limits', r.sent?.gauge1?.pct === 26, String(r.sent?.gauge1?.pct));
 check('row left counts down to the reset', /^(\d+h\d+m|\d+m|now)$/.test(r.sent?.row?.left ?? ''), r.sent?.row?.left);
 check('reading is cached for later invocations', existsSync(QUOTA_CACHE));
