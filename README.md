@@ -11,7 +11,7 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.1.0** or later
+- A Clauled device on USB, running **v3.3.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -94,7 +94,9 @@ Always the `cu.*` node, never `tty.*`. The `tty.*` device is the dial-in side, a
 | `Stop` | Claude finished | inverted banner — `Your turn` |
 | `Notification` | needs permission or input | inverted banner — `Claude needs input` |
 
-The device merges pushes, so a hook sending only `busy` never wipes the gauges. It also composes each gauge line itself — label, paired detail, percentage — into one 21-character row, which is why the labels sent here are short (`5h reset`, `ctx`).
+The device merges pushes, so a hook sending only `busy` never wipes the gauges. It lays out each gauge row itself in three columns — label left, paired detail centred, percentage right — which is why the labels sent here are short (`5h reset`, `ctx`).
+
+The four identity fields go to four corners: `session` top-left, `title` (the model) top-right, `footer.left` (cost) bottom-left, `footer.right` (effort) bottom-right. `session_name` is rarely sent by Claude Code, so the workspace directory name is used instead — which is usually what you want anyway, since it names the project.
 
 **A field that could not be computed is omitted, never sent as "no data".** Claude Code does not send the same payload on every invocation — some carry only `{model, effort}`. Emitting a placeholder for the missing feeds meant one of those reduced payloads actively overwrote good readings with `--`. Staying silent leaves the last good value on the glass.
 

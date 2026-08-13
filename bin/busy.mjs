@@ -8,7 +8,7 @@
 // further pushes. The busy state also self-expires, so a missed Stop hook
 // cannot leave it spinning forever.
 
-import { readStdin, debugLog, push, buildTitle } from './clauled.mjs';
+import { readStdin, debugLog, push, buildTitle, buildSession, buildEffort } from './clauled.mjs';
 
 // Our own list. Claude Code's real spinner vocabulary is not exposed to hooks,
 // so these are in the same spirit but will not match your terminal.
@@ -58,12 +58,16 @@ if (kind === 'tool' && payload.tool_name) {
   text = GERUNDS[Math.floor(Math.random() * GERUNDS.length)];
 }
 
-// Carry the header too. Hook payloads know the current model and effort, and
-// the statusline can go minutes without firing - without this the header stays
-// stale at whatever it said when the statusline last ran.
+// Carry the header and footer too. Hook payloads know the current effort and
+// working directory, and the statusline can go minutes without firing - without
+// this they stay stale at whatever they said when it last ran.
 const body = { v: 3, busy: text.slice(0, 19) };
 const title = buildTitle(payload);
 if (title) body.title = title;
+const session = buildSession(payload);
+if (session) body.session = session;
+const effort = buildEffort(payload);
+if (effort) body.footer = { right: effort };
 
 await push(body);
 

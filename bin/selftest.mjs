@@ -76,6 +76,7 @@ const payload = {
   effort: { level: 'medium' },
   context_window: { context_window_size: 1_000_000 },
   cost: { total_cost_usd: 0 },
+  workspace: { current_dir: 'C:/code/proj' },
 };
 
 console.log('statusline');
@@ -83,7 +84,9 @@ clearQuota();
 let r = await run('statusline.mjs', [], JSON.stringify(payload));
 check('wrote a line to the port', r.raw.endsWith('\n'));
 check('schema v3', r.sent?.v === 3);
-check('header carries model and effort', r.sent?.title === 'Opus 5 med', r.sent?.title);
+check('header carries the model alone', r.sent?.title === 'Opus 5', r.sent?.title);
+check('footer carries the effort spelled out', r.sent?.footer?.right === 'medium', r.sent?.footer?.right);
+check('header carries the session', r.sent?.session === 'proj', r.sent?.session);
 check('gauge1 omitted when no quota source', r.sent?.gauge1 === undefined, JSON.stringify(r.sent?.gauge1));
 check('gauge2 labelled ctx', r.sent?.gauge2?.label === 'ctx');
 check('gauge2 pct from transcript ~70', Math.abs((r.sent?.gauge2?.pct ?? 0) - 70) < 0.5, String(r.sent?.gauge2?.pct));

@@ -711,49 +711,51 @@ export function fmtDuration(ms) {
 
 // Unknown levels fall back to the raw value in buildTitle rather than being
 // dropped - that silently lost "ultra" until it was noticed on the glass.
-// Only `medium` is abbreviated. The device's bottom row has 14 characters for
-// the model and effort together, and every real combination fits with the
-// level spelled out - "Sonnet 5 xhigh" is exactly 14.
-const EFFORT_SHORT = {
-  low: 'low',
-  medium: 'med',
-  high: 'high',
-  xhigh: 'xhigh',
-  ultra: 'ultra',
-  max: 'max',
-};
-
 /**
- * Header right-hand side: model plus effort, e.g. "Opus 5 med".
+ * Header right-hand side: the model alone, e.g. "Opus 5".
  *
- * The header has 14 characters to the right of "Claude". Truncating the joined
- * string would silently drop the effort on longer model names - "Claude Opus 5
- * (1M context)" became "Claude Opus 5 " with the effort gone. Reserve the
- * effort's room first and shorten the model instead.
+ * The effort moved to the footer, so there is no longer a joined string to
+ * truncate - which is what used to silently drop the effort on longer model
+ * names ("Claude Opus 5 (1M context)" became "Claude Opus 5 ").
  */
 export function buildTitle(d) {
-  const MAX = 14;
   let model = (d?.model?.display_name || d?.model?.id || '')
     .replace(/\s*\(.*?\)\s*/g, '')
-    .replace(/^Claude\s+/i, '')     // the header already says "Claude"
+    .replace(/^Claude\s+/i, '')     // it is a Claude device; saying so twice is waste
     .trim();
 
   // Only the statusline payload carries the model; hook payloads carry effort
   // but not model. Cache it from whoever has it so hooks can still render a
-  // complete header instead of wiping the model down to just the effort.
+  // complete header instead of wiping the model out entirely.
   if (model) {
     try { writeFileSync(MODEL_CACHE, model); } catch {}
   } else {
     try { model = readFileSync(MODEL_CACHE, 'utf8').trim(); } catch { model = ''; }
   }
+  return model.slice(0, 14);
+}
 
-  // An unrecognised level is still worth showing, trimmed, rather than dropped.
+/** Footer right-hand side: the effort level, spelled out. */
+export function buildEffort(d) {
   const raw = d?.effort?.level;
-  const effort = raw ? (EFFORT_SHORT[raw] ?? String(raw).slice(0, 4)) : '';
+  return raw ? String(raw).slice(0, 10) : '';
+}
 
-  if (!effort) return model.slice(0, MAX);
-  const room = MAX - effort.length - 1;
-  return `${model.slice(0, Math.max(0, room))} ${effort}`.trim();
+/**
+ * Header left-hand side: which session this is.
+ *
+ * `session_name` is the intended source but Claude Code sends it rarely - once
+ * in fifty payloads, in the captures behind this. The workspace directory is
+ * nearly always there and is arguably the more useful answer anyway: it says
+ * which project the device is reporting on.
+ */
+export function buildSession(d) {
+  const name = typeof d?.session_name === 'string' ? d.session_name.trim() : '';
+  if (name) return name.slice(0, 14);
+
+  const dir = d?.workspace?.current_dir || d?.cwd || '';
+  const base = String(dir).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+  return base.slice(0, 14);
 }
 
 /** "1h21m" until an absolute epoch, for the 5h reset countdown. */
@@ -781,6 +783,9 @@ export function buildDisplay(d) {
   const title = buildTitle(d);
   if (title) out.title = title;
 
+  const session = buildSession(d);
+  if (session) out.session = session;
+
   // NOTHING BELOW IS EMITTED UNLESS IT WAS ACTUALLY COMPUTED.
   //
   // Claude Code does not send the same payload every time - some invocations
@@ -807,8 +812,12 @@ export function buildDisplay(d) {
   if (ctx) row.right = `${fmtTokens(ctx.used)}/${fmtTokens(ctx.size)}`;
   if (Object.keys(row).length) out.row = row;
 
+  const footer = {};
   const cost = d?.cost?.total_cost_usd;
-  if (typeof cost === 'number') out.footer = { left: '$' + cost.toFixed(2) };
+  if (typeof cost === 'number') footer.left = '$' + cost.toFixed(2);
+  const effort = buildEffort(d);
+  if (effort) footer.right = effort;
+  if (Object.keys(footer).length) out.footer = footer;
 
   return out;
 }

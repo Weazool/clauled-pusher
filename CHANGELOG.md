@@ -7,6 +7,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-08-13
+
+Feeds the header and footer that Clauled firmware v3.1.0 removed and v3.3.0
+brought back. Requires firmware **v3.3.0** to render the new fields; against
+anything older they are simply ignored.
+
+### Added
+- **`session`** — which session this is, for the header's left. `session_name`
+  is the intended source, but Claude Code sends it rarely: once in fifty
+  payloads across the captures behind this. The fallback is the workspace
+  directory name, which is nearly always present and is arguably the better
+  answer anyway — it says which *project* the device is reporting on.
+- **`footer.right`** — the effort level, spelled out. It has a corner to itself
+  now, so nothing has to be abbreviated to fit.
+- Hooks send both, alongside the model. Hook payloads carry `cwd` and `effort`,
+  and the statusline can go minutes without firing, so without this the header
+  and footer would sit stale between renders.
+
+### Changed
+- **`title` is the model alone.** It previously joined model and effort into one
+  string capped at 14 characters, which meant a long model name truncated the
+  effort away entirely — `Claude Opus 5 (1M context)` rendered as `Opus 5 (1M`
+  with no effort at all. They are separate fields now, so neither can crowd out
+  the other, and the abbreviation table is gone with them.
+
 ## [3.1.1] - 2026-08-13
 
 ### Fixed
