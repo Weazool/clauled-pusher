@@ -7,6 +7,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-08-13
+
+No functional change.
+
+### Added
+- **A "Files this creates" table in the README** — which of the `~/.clauled-*`
+  dotfiles are config (keep), which are regenerable caches (delete freely),
+  and which is a one-time safety backup. Answering "what's safe to delete in
+  my home directory" from a chat message doesn't survive the chat; putting it
+  in the README does.
+
+### Changed
+- **README trimmed by roughly half** — cut the design-rationale essays (why a
+  shim, why not a direct path, the historical `rate_limits`/`context_window`
+  discovery notes) down to what's needed to operate the plugin. That history
+  is not gone, it lives in this file, in the entries that actually happened
+  when it did.
+
 ## [3.5.0] - 2026-08-13
 
 Pairs with Clauled firmware **v3.6.0**, which makes a live banner invert the

@@ -15,17 +15,15 @@ The device holds no credentials of any kind, and neither does the plugin.
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
-Windows, macOS and Linux. No npm dependencies: serial writes go through Node's built-in `fs`, and the device is located with tools already present on each platform — PowerShell CIM on Windows, `ioreg` on macOS, sysfs on Linux. There is no native `serialport` module to build.
+Windows, macOS and Linux, no npm dependencies. Serial writes go through Node's built-in `fs`, and the device is located with tools already present on each platform — PowerShell CIM on Windows, `ioreg` on macOS, sysfs on Linux.
 
 ## Install
-
-Install the plugin, then run the one setup step:
 
 ```bash
 node bin/install.mjs
 ```
 
-That writes a small shim to `~/.clauled/` and points `statusLine` at it in `~/.claude/settings.json`. It backs the file up first, refuses to clobber a status line that is not ours without `--force`, and then **runs the command through the same shells Claude Code uses** to prove it works rather than assuming it will.
+Writes a shim to `~/.clauled/` and points `statusLine` at it in `~/.claude/settings.json` — a plugin can't ship `statusLine` itself, so this one step is unavoidable. The shim resolves whichever copy of the plugin is currently installed, so it survives updates without needing a version-pinned path. Backs up your settings first; refuses to clobber a different `statusLine` without `--force`.
 
 | Flag | Effect |
 |---|---|
@@ -33,130 +31,75 @@ That writes a small shim to `~/.clauled/` and points `statusLine` at it in `~/.c
 | `--force` | replace a `statusLine` that is not ours |
 | `--uninstall` | remove ours, leave everything else alone |
 
-Then check the device:
-
 ```bash
 node bin/doctor.mjs
 ```
 
-`doctor` isolates "device not reachable" from "the hook never fired", which are very different problems. Run it before debugging anything else.
-
-**Hooks need no setup** — they ship inside the plugin.
-
-### Why the statusline needs a step at all
-
-A plugin cannot ship a `statusLine`. Plugin `settings.json` is validated against a schema that keeps only `agent` and `subagentStatusLine`; every other key, `statusLine` included, is silently discarded. So the entry has to live in your own settings.
-
-### Why a shim rather than a direct path
-
-Because there is no directory that is both current and stable:
-
-| Path | Problem |
-|---|---|
-| `plugins/cache/<market>/<plugin>/<version>/` | version-pinned in the path, and swept roughly 14 days after being superseded |
-| `plugins/marketplaces/<name>/` | stable path, but tracks branch HEAD — so it drifts ahead of the version your hooks actually run |
-
-Point `settings.json` at either and you get a status line that works until abruptly it does not — or, worse, one running different code from your hooks. The shim lives at a path this project owns and resolves the installed plugin at run time, preferring exactly what the hooks use. `doctor` warns if your `statusLine` points into a plugin directory.
-
-The installer also bakes the **absolute** path of your Node interpreter into the command. That is not fussiness: on macOS, launching Claude Code from Finder or the Dock gives it launchd's environment rather than the one your shell builds, so a Homebrew or nvm `node` is not on `PATH` and a bare `node` fails silently. Claude Code exports no variable pointing at an interpreter, so recording the one that ran the installer is the only reliable answer. After a Node upgrade, re-run `install.mjs`; `doctor` checks that the path still exists.
+Run this before debugging anything else — it isolates "device not reachable" from "the hook never fired." Hooks need no setup; they ship inside the plugin.
 
 ## Plug and play
 
-The device is found by its Espressif USB vendor ID (`303A`) on every platform, not by a hardcoded port. **Move it to a different USB socket and it keeps working.** That matters more than it sounds: a typical machine has several USB serial devices, so "the first serial port" is not a device identity.
+Found by Espressif USB vendor ID (`303A`), not a fixed port — move it to a different socket and it keeps working. Discovery is cached 5 minutes; a failed write re-detects once and retries.
 
-Discovery is cached for five minutes, because a scan costs over a second. Misses are cached too, for thirty seconds — without that, an unplugged device made every hook pay for a full enumeration before every tool call, which reads as Claude Code itself having gone slow. A failed write re-detects once and retries, so replugging recovers by itself.
-
-You only need `~/.clauled.json` to override detection or enable optional behaviour:
+`~/.clauled.json` overrides detection or enables optional behaviour, all fields optional:
 
 ```json
 { "port": "", "debug": false, "token": "", "quietStart": 0, "quietEnd": 6 }
 ```
 
-`CLAULED_PORT`, `CLAULED_DEBUG` and `CLAULED_TOKEN` override the file. A malformed config is reported by `doctor` rather than silently ignored.
+`CLAULED_PORT`, `CLAULED_DEBUG`, `CLAULED_TOKEN` override the file.
+
+**macOS:** class-compliant USB CDC, no driver needed. Check with `ls /dev/cu.usbmodem*` — always `cu.*`, never `tty.*` (the latter blocks on open).
 
 ## Quiet hours
 
-The device has no clock — deliberately, see below — so it cannot know on its own whether it's currently the middle of the night. This plugin computes that from the machine's own local time and sends it on every push; the device only tracks how long it's been idle, and powers the panel fully off once both are true. Default window is midnight–6am, idle threshold 15 minutes, both overridable:
+The device has no clock, so this plugin computes "is it currently quiet hours" from local time and sends it on every push; the device only tracks idle duration. Default midnight–6am, 15 min idle threshold, panel powers fully off once both are true. Requires firmware **v3.5.0**.
 
 ```json
 { "quietStart": 23, "quietEnd": 7 }
 ```
 
-`quietEnd` is exclusive; a value less than or equal to `quietStart` wraps past midnight, so `23`/`7` means 11pm–7am. Requires Clauled firmware **v3.5.0**.
-
-**Any push wakes the device immediately**, regardless of what it contains — idle resets to zero the moment anything arrives, which is also why `quiet` is sent as a plain boolean on *every* push rather than only when true. The device only updates its own copy on an explicit value; sending `true` once and then omitting the field would leave the panel dark forever, well past 6am, because nothing would ever tell it otherwise.
-
-**This is best-effort, not exact**, in the same way the 5h countdown is: if Claude Code is fully closed for hours spanning the quiet-hours boundary, no push arrives to refresh the flag, and the device just keeps whatever it last received. That is the accepted cost of a device with no network stack and no wall clock, not a bug to chase.
-
-### macOS notes
-
-The board is class-compliant USB CDC, so no driver is needed. The manual check is:
-
-```bash
-ls /dev/cu.usbmodem*
-```
-
-Always the `cu.*` node, never `tty.*`. The `tty.*` device is the dial-in side, and `open()` on it **blocks until carrier is asserted** — in a hook, that is a hang rather than an error. The pusher only ever opens `cu.*`, and opens it with `O_NOCTTY | O_NONBLOCK` so it cannot block under any circumstances.
+`quietEnd` is exclusive; an end at or before start wraps past midnight (`23`/`7` = 11pm–7am). Any push wakes the device immediately.
 
 ## What gets pushed
 
-Every trigger below pushes the **full display** — session, model, effort,
-both gauges, and whether it's currently quiet hours — plus whatever that
-trigger exists to add. None of them send a partial update anymore:
-
 | Source | Trigger | Adds |
 |---|---|---|
-| statusline | every render | — (this is the only source with the model) |
+| statusline | every render | — (the only source with the model) |
 | `UserPromptSubmit` | you hit enter | spinner with a gerund — `Discombobulating` |
 | `PreToolUse` | before each tool | the activity — `Running Bash`, `Editing main.cpp` |
 | `Stop` | Claude finished | inverted banner — `Your turn` |
 | `Notification` | needs permission or input | inverted banner — `Claude needs input` |
 
-Every push runs through the same `buildDisplay()` the statusline uses, so
-there is one code path deciding what session, model, effort and both gauges
-look like, not four slightly different ones. Session and effort come straight
-from the hook payload and are always current; the gauges come from the cached
-quota and the session transcript, both of which a hook payload can reach.
-**The model is the one exception** — Claude Code's hook payloads never carry
-it, only the statusline's do — so on a hook-only turn it is served from
-whatever the last statusline render cached, and can lag by one render if you
-switch models and prompt again before that render happens.
+Every trigger pushes the **full display** — session, model, effort, both gauges, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's served from whatever the last statusline render cached.
 
-The device still merges on top of all this, so a push that could not compute
-something just leaves the last value in place rather than blanking it. It also
-lays out each gauge row itself in three columns — label left, paired detail
-centred, percentage right — which is why the labels sent here are short
-(`5h reset`, `ctx`).
-
-The identity fields go to fixed spots: `session` in the header, centred;
-`title` (the model) at the footer's left; `footer.right` (effort) at the
-footer's right. `session_name` is rarely sent by Claude Code, so the workspace
-directory name is used instead — usually what you want anyway, since it names
-the project.
-
-**A field that could not be computed is omitted, never sent as "no data".** Claude Code does not send the same payload on every invocation — some carry only `{model, effort}`. Emitting a placeholder for the missing feeds meant one of those reduced payloads actively overwrote good readings with `--`. Staying silent leaves the last good value on the glass.
-
-**The gerunds are ours, not Claude Code's.** Its real spinner vocabulary is not exposed to hooks, so these are in the same spirit but will not match your terminal.
+Labels stay short (`5h lim`, `ctx`) — the device composes each into one line with its detail and percentage. A field that can't be computed is omitted, never sent as a placeholder; the device merges, so an omitted field just keeps its last value.
 
 ## The two gauges
 
-They come from different places and fail independently.
+**Context** — from the payload's `context_window` when present, else the session transcript.
 
-**Context** — from the payload's `context_window` block when present, computed from the session transcript otherwise. The transcript path matters because the statusline renders *before* the turn's usage block is written, so the `Stop` hook recomputes it. Only the last 256 KB is read, so it stays fast on multi-megabyte transcripts.
-
-**5h subscription quota** — from the payload's `rate_limits` block. Free, no credentials, and it carries `seven_day` too.
-
-Claude Code sends `rate_limits` on some statusline invocations but not all, so the reading is cached and carried forward. If your setup never sends it, an OAuth token is available as a **fallback**:
+**5h quota** — from the payload's `rate_limits` block, no credential needed. Sent on some renders, not all, so the reading is cached. If it never arrives, a token is a fallback:
 
 ```bash
 claude setup-token
 ```
-
 ```json
 { "token": "sk-ant-oat01-..." }
 ```
 
-Be clear-eyed about that trade: it is a real credential with `user:inference` scope, valid for a year, in a plaintext file in your home directory. `chmod 600` it, and prefer going without — the payload path needs no secret at all. On macOS the plugin also reads Claude Code's own credentials from the login Keychain, since there is no credentials file there.
+A real credential, `user:inference` scope, valid a year — `chmod 600` the file, and prefer going without.
+
+## Files this creates
+
+| File | Keep or delete |
+|---|---|
+| `~/.clauled.json` | **Keep** — your config (token, port, quiet hours) |
+| `~/.clauled/statusline.mjs` | **Keep** — the installed shim; `settings.json` points at it |
+| `~/.clauled-port`, `~/.clauled-quota.json`, `~/.clauled-model` | Caches — safe to delete, regenerate within seconds |
+| `~/.clauled-quota-refreshing` | A lock file, self-expires in 15s — safe to delete anytime |
+| `~/.clauled-debug.log` | Only exists when `"debug": true` — delete freely, **check contents before sharing** (prompts, file paths) |
+| `~/.claude/settings.json.clauled-backup` | A one-time safety backup from `install.mjs` — harmless to keep or delete |
 
 ## Testing without the device
 
@@ -164,46 +107,23 @@ Be clear-eyed about that trade: it is a real credential with `user:inference` sc
 node bin/selftest.mjs
 ```
 
-Points `CLAULED_PORT` at a temp file, runs the real scripts against a synthetic transcript, and asserts on the exact bytes they write. It runs against **its own throwaway home directory** — otherwise the results depend on whether the machine happens to have a token configured, which is how one assertion passed for months while testing nothing.
-
-## What Claude Code actually sends
-
-Captured live. Worth recording, because two earlier conclusions here were wrong and shaped the design badly:
-
-- **`rate_limits` does exist**, with `five_hour` and `seven_day`, each carrying `used_percentage` and `resets_at`. It was previously documented as absent — a conclusion drawn from sampling only the reduced payloads. A payload's `resets_at` matches the epoch from the API's rate-limit headers exactly.
-- **`context_window` does populate**, with `context_window_size`, `total_input_tokens` and a `current_usage` breakdown. Also previously documented as always zero.
-- **The payload shape varies per invocation.** Anywhere from 16 keys down to `{model, effort}`. Nothing may assume a field is present.
-- Hook payloads carry `effort` but **not** `model`, so the model is cached from whoever has it.
-
-To capture payloads yourself, set `"debug": true` in `~/.clauled.json` — effective on the next render, nothing to restart. **That log contains whatever Claude Code sends, including file paths and prompts. Check it before sharing.**
-
-## Why Node rather than shell scripts
-
-Claude Code runs hook and statusline commands through a shell — `/bin/sh` on macOS, Git Bash on Windows with PowerShell as a fallback. A Node entry point is the one form that works identically under all three, with no polyglot wrapper and no `.cmd` shim.
-
-It also avoids a quoting trap. `"C:/Program Files/nodejs/node.exe" script.mjs` runs under sh, Git Bash and cmd — but PowerShell treats a leading quoted token as a *string literal* and prints it instead, producing no status line and no error. The installer sidesteps this by emitting an unquoted, space-free path, using the DOS 8.3 alias on Windows when necessary, and verifies the result under every shell it can find.
+Runs the real scripts against a synthetic transcript and a throwaway home directory, asserting on the exact bytes written.
 
 ## Troubleshooting
 
-**`doctor` says no device found.** Check the cable carries data, and that the board enumerates with vendor ID `303A`.
+**`doctor` says no device found.** Check the cable carries data.
 
-**`no reply` from the status probe.** Another program is probably holding the port. Close `pio device monitor` or any serial terminal; only one process can own it.
+**`no reply` from the status probe.** Another program is holding the port — close any serial monitor.
 
-**Gauge 1 shows `--`.** No `rate_limits` seen yet. One will arrive on a later render; a token is only needed if it never does.
+**Gauge 1 shows `--`.** No `rate_limits` seen yet; arrives on a later render, or configure a token.
 
-**Gauge 2 shows `--`.** No transcript and no `context_window` yet — normal in the first seconds of a session.
+**Gauge 2 shows `--`.** No transcript yet — normal in the first seconds of a session.
 
-**The screen is completely dark, not even the sleeping face.** Run `doctor` — it reports the current quiet-hours computation and, from the device's own status probe, whether the panel is intentionally powered off (`quiet_sleep: true`). Any push wakes it.
+**Screen is completely dark.** Run `doctor` — reports whether it's quiet-hours power-down (`quiet_sleep: true`) rather than unreachable. Any push wakes it.
 
-**Hooks never fire on macOS.** Most likely `node` is not on the `PATH` Claude Code inherited. `doctor` checks this. Launching Claude Code from a terminal is the quickest confirmation.
+**Hooks never fire on macOS.** Likely `node` isn't on the `PATH` Claude Code inherited (a Finder/Dock launch uses launchd's, not your shell's). `doctor` checks this; launching from a terminal is the quickest confirmation.
 
-**Hooks never fire otherwise.** Confirm the plugin is enabled, then test the script directly:
-
-```bash
-echo "{}" | node bin/event.mjs stop
-```
-
-If that pushes successfully, the script is fine and the problem is hook registration. Hooks register at app **startup**, so a plugin update needs a restart, not just a new chat.
+**Hooks never fire otherwise.** Test directly: `echo "{}" | node bin/event.mjs stop`. If that pushes successfully, the problem is hook registration — restart Claude Code after a plugin update, a new chat isn't enough.
 
 ## License
 
