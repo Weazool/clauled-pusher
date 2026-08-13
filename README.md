@@ -11,9 +11,11 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.8.0** or later
+- A Clauled device on USB, running **v3.9.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
+
+Older firmware still works — this plugin paces and frames its writes so it does not depend on the device's own buffer fix — but **v3.9.0 is the one you want**: before it, the device's serial receive queue was smaller than a full display push, so anything over ~261 bytes was truncated and silently dropped.
 
 Windows, macOS and Linux, no npm dependencies. Serial writes go through Node's built-in `fs`, and the device is located with tools already present on each platform — PowerShell CIM on Windows, `ioreg` on macOS, sysfs on Linux.
 
