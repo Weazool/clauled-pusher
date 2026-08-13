@@ -68,8 +68,11 @@ The device has no clock, so this plugin computes "is it currently quiet hours" f
 | statusline | every render | — (the only source with the model) |
 | `UserPromptSubmit` | you hit enter | spinner with a gerund — `Discombobulating` |
 | `PreToolUse` | before each tool | the activity — `Running Bash`, `Editing main.cpp` |
+| `PreToolUse` | a tool that waits for *you* | inverted banner — `Review plan`, `Answer question` |
 | `Stop` | Claude finished | inverted banner — `Your turn` |
 | `Notification` | needs permission or input | inverted banner — `Claude needs input` |
+
+Most tools mean Claude is working, so they get a spinner. A few — `ExitPlanMode`, `AskUserQuestion` — mean the opposite: the tool's execution *is* the prompt, so `PreToolUse` fires exactly when your attention starts being needed. Those raise a banner instead, and clear when your next turn starts.
 
 Every trigger pushes the **full display** — session, model, effort, both quota readings, context, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's served from a per-session cache instead (see **Multiple sessions** below).
 

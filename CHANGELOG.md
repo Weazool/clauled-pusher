@@ -7,6 +7,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-08-14
+
+### Added
+- **A proposed plan raises a `Review plan` banner** instead of a spinner.
+  `PreToolUse` for `ExitPlanMode` fires at exactly the moment your attention
+  starts being needed — for that tool, the run *is* the prompt — so it now
+  raises the same inverted banner `Stop` does, with its own wording.
+  Previously it rendered as `Running ExitPlanMode`: the busiest-looking thing
+  on the screen at the precise moment nothing was happening without you.
+- **`AskUserQuestion` gets the same treatment**, as `Answer question`. It is
+  the same category — a tool whose whole purpose is to stop and wait for you —
+  and the two are now driven by one small table rather than special-cased
+  individually, so adding another is a one-line change.
+
+  Both clear themselves the way every banner does: the next tool call after
+  you respond pushes a spinner, which supersedes the banner on the device. No
+  new firmware needed — these are ordinary `events` pushes, so any firmware
+  from v3.0.0 renders them.
+
 ## [3.8.0] - 2026-08-13
 
 **The transport was silently losing most pushes.** Everything else here is

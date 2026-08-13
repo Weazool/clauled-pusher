@@ -304,6 +304,26 @@ check('unknown tool falls back', /^Running /.test(r.sent?.busy ?? ''), r.sent?.b
 
 check('busy text fits one line', (r.sent?.busy ?? '').length <= 19, String((r.sent?.busy ?? '').length));
 
+console.log('\ntools that wait for you raise a banner, not a spinner');
+// PreToolUse for these fires exactly when your attention starts being needed -
+// the tool's execution IS the prompt. Rendering them as a spinner said
+// "Running ExitPlanMode" at the precise moment nothing was happening
+// without you.
+r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'ExitPlanMode' }));
+check('a proposed plan raises "Review plan"', r.sent?.events?.[0]?.text === 'Review plan', JSON.stringify(r.sent?.events));
+check('and clears the spinner rather than setting one', r.sent?.busy === '', JSON.stringify(r.sent?.busy));
+
+r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'AskUserQuestion' }));
+check('a question raises "Answer question"', r.sent?.events?.[0]?.text === 'Answer question', JSON.stringify(r.sent?.events));
+
+// The banner must still be a normal full push - it is not a special-cased
+// payload that forgets everything else the display needs.
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  ...payload, tool_name: 'ExitPlanMode', effort: { level: 'high' },
+}));
+check('the plan banner still carries the full display', r.sent?.gauge1?.pct === 26 && r.sent?.footer?.right === 'high', JSON.stringify({ g1: r.sent?.gauge1?.pct, effort: r.sent?.footer?.right }));
+check('the plan banner fits one screen line', (r.sent?.events?.[0]?.text ?? '').length <= 21);
+
 console.log('\nevents');
 r = await run('event.mjs', ['stop'], '{}');
 check('stop raises a banner', r.sent?.events?.[0]?.text === 'Your turn', r.sent?.events?.[0]?.text);

@@ -35,6 +35,25 @@ const TOOL_VERBS = {
   NotebookEdit: 'Editing notebook',
 };
 
+/**
+ * Tools whose whole purpose is to STOP and wait for you.
+ *
+ * PreToolUse fires just before the tool runs, and for these the run IS the
+ * prompt - so this hook is the exact moment your attention starts being
+ * needed. They are the opposite of everything in TOOL_VERBS: those describe
+ * Claude working, these describe Claude waiting. Rendering them as a spinner
+ * ("Running ExitPlanMode") said the busiest possible thing at the precise
+ * moment nothing was happening without you.
+ *
+ * These raise the same inverted banner Stop does, with their own wording, and
+ * clear themselves the same way - the next tool call after you respond pushes
+ * a spinner, which supersedes the banner on the device.
+ */
+const ATTENTION_TOOLS = {
+  ExitPlanMode: 'Review plan',
+  AskUserQuestion: 'Answer question',
+};
+
 const kind = (process.argv[2] || 'prompt').toLowerCase();
 
 const raw = await readStdin();
@@ -45,6 +64,17 @@ try {
   payload = JSON.parse(raw);
 } catch {
   /* fall through to a generic gerund */
+}
+
+const attention = kind === 'tool' ? ATTENTION_TOOLS[payload.tool_name] : undefined;
+if (attention) {
+  await push({
+    ...buildDisplay(payload),
+    v: 3,
+    busy: '',
+    events: [{ type: 'attention', text: attention }],
+  });
+  process.exit(0);
 }
 
 let text;
