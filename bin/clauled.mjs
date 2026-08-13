@@ -17,9 +17,9 @@ const DEBUG_PATH  = join(homedir(), '.clauled-debug.log');
 const ESP_VID     = '303A';          // Espressif
 const CACHE_TTL_MS = 5 * 60 * 1000;  // re-scan at most every 5 minutes
 
-/** Optional. Only needed to override auto-detection. */
+/** Optional. Only needed to override auto-detection or turn on debug capture. */
 export function loadConfig() {
-  const cfg = { port: '' };
+  const cfg = { port: '', debug: false };
   try {
     Object.assign(cfg, JSON.parse(readFileSync(CONFIG_PATH, 'utf8')));
   } catch { /* absent is the normal case */ }
@@ -39,8 +39,20 @@ export function readStdin() {
   });
 }
 
+/**
+ * Capture raw payloads to ~/.clauled-debug.log.
+ *
+ * Enabled by CLAULED_DEBUG=1 OR by "debug": true in ~/.clauled.json. The config
+ * flag matters: an environment variable has to be set on the process that
+ * launches Claude Code, which means restarting it. The file is re-read on every
+ * invocation, so toggling it takes effect on the very next render.
+ */
 export function debugLog(tag, data) {
-  if (!process.env.CLAULED_DEBUG) return;
+  let on = !!process.env.CLAULED_DEBUG;
+  if (!on) {
+    try { on = !!loadConfig().debug; } catch { /* never break the caller */ }
+  }
+  if (!on) return;
   try {
     appendFileSync(DEBUG_PATH, `\n=== ${tag} ${new Date().toISOString()}\n${data}\n`);
   } catch { /* debug logging must never break the caller */ }
