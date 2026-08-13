@@ -93,6 +93,7 @@ check(
 );
 
 const payload = {
+  session_id: 'aaaa1111-bbbb-2222-cccc-333344445555',
   transcript_path: TRANSCRIPT,
   model: { display_name: 'Opus 5 (1M context)' },
   effort: { level: 'medium' },
@@ -109,6 +110,7 @@ check('schema v3', r.sent?.v === 3);
 // so only the SHAPE is checked here - that it is always sent, never omitted,
 // which is what lets the device clear a stale "true" once quiet hours end.
 check('quiet is always present as a boolean', typeof r.sent?.quiet === 'boolean', JSON.stringify(r.sent?.quiet));
+check('sid is the first 8 hex chars of session_id', r.sent?.sid === 'aaaa1111', r.sent?.sid);
 check('header carries the model alone', r.sent?.title === 'Opus 5', r.sent?.title);
 check('footer carries the effort spelled out', r.sent?.footer?.right === 'medium', r.sent?.footer?.right);
 check('header carries the session', r.sent?.session === 'proj', r.sent?.session);
@@ -131,11 +133,19 @@ r = await run('statusline.mjs', [], JSON.stringify({
     seven_day: { used_percentage: 21, resets_at: soon + 86_400 },
   },
 }));
-check('gauge1 labelled 5h lim', r.sent?.gauge1?.label === '5h lim');
+check('gauge1 labelled 5h', r.sent?.gauge1?.label === '5h', r.sent?.gauge1?.label);
 check('gauge1 comes from rate_limits', r.sent?.gauge1?.pct === 26, String(r.sent?.gauge1?.pct));
 check('row left counts down to the reset', /^(\d+h\d+m|\d+m|now)$/.test(r.sent?.row?.left ?? ''), r.sent?.row?.left);
 check('reading is cached for later invocations', existsSync(QUOTA_CACHE));
 check('seven_day is captured too', JSON.parse(readFileSync(QUOTA_CACHE, 'utf8')).data.week === 21);
+
+// gauge3 (the weekly reading) rides the same rate_limits block. It is
+// entirely new - v3.6.x firmware just ignores an unrecognised field, which is
+// what makes it safe to always send once available rather than needing a
+// firmware-version check on the host side.
+check('gauge3 labelled 1w', r.sent?.gauge3?.label === '1w', r.sent?.gauge3?.label);
+check('gauge3 comes from seven_day', r.sent?.gauge3?.pct === 21, String(r.sent?.gauge3?.pct));
+check('gauge3 carries its own reset countdown', /^(\d+h\d+m|\d+m|now)$/.test(r.sent?.gauge3?.reset ?? ''), r.sent?.gauge3?.reset);
 
 // The device composes "<label> <detail> <pct>%" into ONE 21-character row, so
 // what is sent here decides whether that row fits. Check the worst case: 100%
@@ -143,6 +153,8 @@ check('seven_day is captured too', JSON.parse(readFileSync(QUOTA_CACHE, 'utf8'))
 // row most needs to be readable.
 const quotaLine = `${r.sent?.gauge1?.label} ${r.sent?.row?.left} 100%`;
 check('quota line fits 21 chars at 100%', quotaLine.length <= 21, `${quotaLine.length} - "${quotaLine}"`);
+const weekLine = `${r.sent?.gauge3?.label} ${r.sent?.gauge3?.reset} 100%`;
+check('weekly line fits 21 chars at 100%', weekLine.length <= 21, `${weekLine.length} - "${weekLine}"`);
 
 console.log('\ncontext_window in the payload beats the transcript');
 r = await run('statusline.mjs', [], JSON.stringify({
@@ -189,10 +201,38 @@ r = await run('busy.mjs', ['prompt'], JSON.stringify({
   workspace: { current_dir: 'C:/code/other-project' },
 }));
 check('busy carries the model from cache', r.sent?.title === 'Opus 5', r.sent?.title);
+check('busy carries its sid too', r.sent?.sid === 'aaaa1111', r.sent?.sid);
 check('busy carries the session from cwd', r.sent?.session === 'other-project', r.sent?.session);
 check('busy carries the effort fresh from the payload', r.sent?.footer?.right === 'high', r.sent?.footer?.right);
 check('busy carries the cached quota', r.sent?.gauge1?.pct === 26, String(r.sent?.gauge1?.pct));
 check('busy carries context from the transcript', Math.abs((r.sent?.gauge2?.pct ?? 0) - 70) < 0.5, String(r.sent?.gauge2?.pct));
+
+console.log('\nthe model cache does not leak across sessions');
+// This is the whole reason the model cache became per-sid instead of one
+// shared file: two concurrent sessions can genuinely be on different models.
+// A hook-only push (no model field) for a session that has NEVER had its own
+// statusline render should NOT recover session A's cached "Opus 5" - it
+// should come back with no model at all, same as if nothing were cached.
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  session_id: 'zzzz9999-0000-1111-2222-333344445555',   // a session never seen before
+  tool_name: 'Bash',
+}));
+check('a different session with no cache of its own gets no model', r.sent?.title === undefined, JSON.stringify(r.sent?.title));
+check('but it still gets its own sid', r.sent?.sid === 'zzzz9999', r.sent?.sid);
+
+// Once THAT session's statusline runs, it caches its OWN model - proving the
+// two sessions' entries coexist rather than one overwriting the other.
+r = await run('statusline.mjs', [], JSON.stringify({
+  session_id: 'zzzz9999-0000-1111-2222-333344445555',
+  model: { display_name: 'Sonnet 5' },
+}));
+check('the second session caches its own, different model', r.sent?.title === 'Sonnet 5', r.sent?.title);
+
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  session_id: 'aaaa1111-bbbb-2222-cccc-333344445555',   // back to the first session
+  tool_name: 'Bash',
+}));
+check('the first session still recovers ITS OWN model, unaffected by the second', r.sent?.title === 'Opus 5', r.sent?.title);
 
 r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'Bash' }));
 check('tool name becomes an activity', r.sent?.busy === 'Running Bash', r.sent?.busy);

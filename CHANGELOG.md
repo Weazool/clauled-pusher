@@ -7,6 +7,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-08-13
+
+Multiple Claude Code sessions on one device. Requires Clauled firmware
+**v3.7.0** for the roster/rotation to actually appear; against older
+firmware every push still lands in its one shared slot, unchanged.
+
+### Added
+- **`sid`**, an 8-character key derived from `session_id`, sent on every
+  push via `buildDisplay()` - every trigger gets it for free, the same way
+  the v3.3.0 refactor gave every trigger the gauges for free.
+- **`gauge3`**, the weekly (7-day, all models) quota - `readQuota()` already
+  captured this from `rate_limits.seven_day`, it just never had anywhere to
+  go on the device before now. No token fallback for it; only the payload
+  carries it.
+
+### Changed
+- **The model cache is now per-`sid`** (`~/.clauled-models.json`, replacing
+  `~/.clauled-model`). A single shared cache meant a hook-only push for
+  session B could recover session A's cached model the moment they run
+  different ones - a real, visible bug once sessions are shown side by side
+  instead of one overwriting the other. `buildTitle()` keys its lookups and
+  writes by `sid` now; verified with a dedicated selftest proving two
+  concurrent sessions' cached models stay isolated from each other.
+- **Gauge 1's label is `5h`**, was `5h lim` - two characters shorter, giving
+  the alternating quota row (5h/1w) more room on the device.
+- **`doctor`'s synthetic test push uses its own dedicated `sid`**
+  (`doctor00`), so running it no longer touches any real session's roster
+  slot - previously the single shared display meant running `doctor` briefly
+  overwrote whatever was actually on screen. It also now restores the
+  account-level quota gauges rather than one session's, since those became
+  global on the device.
+
 ## [3.5.1] - 2026-08-13
 
 No functional change.

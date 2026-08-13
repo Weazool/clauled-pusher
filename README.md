@@ -11,7 +11,7 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.6.0** or later
+- A Clauled device on USB, running **v3.7.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -71,15 +71,21 @@ The device has no clock, so this plugin computes "is it currently quiet hours" f
 | `Stop` | Claude finished | inverted banner — `Your turn` |
 | `Notification` | needs permission or input | inverted banner — `Claude needs input` |
 
-Every trigger pushes the **full display** — session, model, effort, both gauges, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's served from whatever the last statusline render cached.
+Every trigger pushes the **full display** — session, model, effort, both quota readings, context, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's served from a per-session cache instead (see **Multiple sessions** below).
 
-Labels stay short (`5h lim`, `ctx`) — the device composes each into one line with its detail and percentage. A field that can't be computed is omitted, never sent as a placeholder; the device merges, so an omitted field just keeps its last value.
+Labels stay short (`5h`, `1w`, `ctx`) — the device composes each into one line with its detail and percentage. A field that can't be computed is omitted, never sent as a placeholder; the device merges, so an omitted field just keeps its last value.
 
-## The two gauges
+## Multiple sessions
 
-**Context** — from the payload's `context_window` when present, else the session transcript.
+Every push is tagged with `sid`, an 8-character key derived from Claude Code's own `session_id`. The device (firmware v3.7.0+) tracks up to 8 concurrent sessions from that tag alone — no coordination needed on this side — and rotates between whichever need attention, or are working, or are just idle, every few seconds. See the firmware's [API.md](https://github.com/Weazool/clauled/blob/main/API.md) for the full rotation and priority rules.
 
-**5h quota** — from the payload's `rate_limits` block, no credential needed. Sent on some renders, not all, so the reading is cached. If it never arrives, a token is a fallback:
+The one thing this plugin does own per session: the **model cache**. Hook payloads never carry the model, only the statusline's do, so each session's last-known model is cached separately, keyed by its own `sid` — otherwise session A's model would leak into session B's display the moment they run different ones.
+
+## The two account gauges
+
+Both are the same value for every session under this login — sent globally, not per-session.
+
+**5h and weekly (1w) quota** — from the payload's `rate_limits` block (`five_hour` and `seven_day`), no credential needed. Sent on some renders, not all, so the reading is cached. If the 5h figure never arrives, a token is a fallback — there is no token fallback for the weekly one:
 
 ```bash
 claude setup-token
@@ -90,13 +96,15 @@ claude setup-token
 
 A real credential, `user:inference` scope, valid a year — `chmod 600` the file, and prefer going without.
 
+**Context** — per-session, from the payload's `context_window` when present, else the session transcript.
+
 ## Files this creates
 
 | File | Keep or delete |
 |---|---|
 | `~/.clauled.json` | **Keep** — your config (token, port, quiet hours) |
 | `~/.clauled/statusline.mjs` | **Keep** — the installed shim; `settings.json` points at it |
-| `~/.clauled-port`, `~/.clauled-quota.json`, `~/.clauled-model` | Caches — safe to delete, regenerate within seconds |
+| `~/.clauled-port`, `~/.clauled-quota.json`, `~/.clauled-models.json` | Caches — safe to delete, regenerate within seconds |
 | `~/.clauled-quota-refreshing` | A lock file, self-expires in 15s — safe to delete anytime |
 | `~/.clauled-debug.log` | Only exists when `"debug": true` — delete freely, **check contents before sharing** (prompts, file paths) |
 | `~/.claude/settings.json.clauled-backup` | A one-time safety backup from `install.mjs` — harmless to keep or delete |

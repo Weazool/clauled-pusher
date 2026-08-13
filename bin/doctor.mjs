@@ -12,7 +12,12 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, buildTitle, isQuietHours, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, isQuietHours, tokenSourceHint } from './clauled.mjs';
+
+// A dedicated, fake session id - so the test push lands in its OWN roster
+// slot on the device (v3.7.0+) rather than colliding with a real session or
+// the shared "" fallback slot a single-session setup might be using.
+const DOCTOR_SID = 'doctor00';
 
 let failures = 0;
 const ok   = (m) => console.log(`  ok    ${m}`);
@@ -76,6 +81,9 @@ if (port) {
     ok('device replied');
     const s = r.status;
     note(`version=${s.version} display_ok=${s.display_ok} uptime=${s.uptime}s last_push_age=${s.last_push_age}`);
+    if (typeof s.sessions === 'number') {
+      note(`sessions in the roster right now: ${s.sessions}${s.sessions > 1 ? ' - rotating every 3s' : ''}`);
+    }
     if (s.display_ok === false) {
       note('note: display not detected - device runs headless, pushes still work');
     }
@@ -94,60 +102,69 @@ if (port) {
   console.log('\npush');
   const display = push({
     v: 3,
+    sid: DOCTOR_SID,
     session: 'doctor',
     title: 'test',
     quiet,   // the real value - never fake this, it is a live state flag
-    gauge1: { label: '5h lim', pct: 23 },
+    gauge1: { label: '5h', pct: 23 },
+    gauge3: { label: '1w', pct: 61, reset: '3d4h' },
     gauge2: { label: 'ctx', pct: 42 },
     row: { left: '1h21m', right: '420k/1M' },
     footer: { right: 'xhigh' },
   });
   if (display.ok) ok('display push written'); else bad(`display push failed (${display.reason})`);
 
-  const event = push({ v: 3, busy: '', events: [{ type: 'attention', text: 'doctor test' }] });
+  const event = push({ v: 3, sid: DOCTOR_SID, busy: '', events: [{ type: 'attention', text: 'doctor test' }] });
   if (event.ok) ok('event push written'); else bad(`event push failed (${event.reason})`);
 
   if (display.ok && event.ok) {
-    note('the screen should show two gauges and a test banner');
+    note('the screen should show two gauges (5h alternating with 1w) and a test banner');
   }
 
-  // RESTORE. The values above are synthetic but entirely plausible - 23% with
-  // a 1h21m countdown reads exactly like a real quota - and the device merges,
-  // so they sit on the glass until something overwrites them. That can be
-  // minutes, and in the meantime the device looks simply wrong.
+  // RESTORE. gauge1/gauge3 are ACCOUNT-LEVEL on the device (v3.7.0+) - the
+  // same row every session shares - so a fake 23% here does not just sit in
+  // doctor's own slot, it is what EVERY session would show until something
+  // overwrites it. That can be minutes; restore the real cached reading
+  // immediately rather than leave it wrong in the meantime.
   if (display.ok) {
-    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }], session: '', quiet: isQuietHours(cfg) };
-
-    // The model has a real cache of its own (~/.clauled-model), written by
-    // whichever push last carried a real one. Restoring from it beats leaving
-    // "test" on the glass - though it can only ever be as fresh as the last
-    // statusline render, since hooks never carry the model at all.
-    restore.title = buildTitle({});
+    const restore = {
+      v: 3, sid: DOCTOR_SID, busy: '',
+      events: [{ type: 'clear', text: '' }],
+      session: '', title: '',   // doctor was never a real session - nothing to restore this TO
+      quiet: isQuietHours(cfg),
+    };
 
     const q = readCachedQuota();
     if (q) {
-      restore.gauge1 = { label: '5h lim', pct: Math.round(q.pct * 10) / 10 };
+      restore.gauge1 = { label: '5h', pct: Math.round(q.pct * 10) / 10 };
       if (q.resetAt) restore.row = { left: fmtUntil(q.resetAt) };
+      if (q.week != null) {
+        restore.gauge3 = { label: '1w', pct: Math.round(q.week * 10) / 10 };
+        if (q.weekResetAt) restore.gauge3.reset = fmtUntil(q.weekResetAt);
+      }
     }
     push(restore);
     console.log('');
-    if (q) ok('test values cleared; the quota gauge is real again');
+    if (q) ok('test values cleared; the quota gauges are real again');
     else   warn('test values cleared, but there is no cached quota to restore');
-    note('the context gauge and the effort corner still hold doctor\'s values —');
+    note('the context gauge and effort corner still hold doctor\'s values —');
     note('the next statusline render or hook corrects them');
+    note(`doctor's own "doctor" session stays in the roster up to SESSION_GONE_S`);
+    note('(15 min default) before ageing out on its own - harmless, just cosmetic');
   }
 }
 
 // 5. Quota feed - optional, and its absence must not read as a failure.
-console.log('\n5h quota feed');
+console.log('\nquota feed');
 const q = readCachedQuota();
 if (q) {
-  ok(`cached: ${q.pct.toFixed(1)}%${q.stale ? ' (stale, refreshing)' : ''}${q.source === 'payload' ? ' - from the statusline payload, no token needed' : ''}`);
-  if (q.week != null) note(`7-day: ${q.week.toFixed(1)}% (recorded; the device has no third gauge)`);
+  ok(`5h: ${q.pct.toFixed(1)}%${q.stale ? ' (stale, refreshing)' : ''}${q.source === 'payload' ? ' - from the statusline payload, no token needed' : ''}`);
+  if (q.week != null) ok(`1w: ${q.week.toFixed(1)}% - alternates with the 5h row on the device every few seconds`);
+  else note('1w: not seen yet - only arrives via the payload\'s rate_limits block, no token fallback for it');
 } else {
   console.log('  --    no reading yet');
   note('Claude Code sends rate_limits on some statusline payloads; one will populate this');
-  note(`a token is only a fallback - ${tokenSourceHint()}`);
+  note(`a token is only a fallback for the 5h figure - ${tokenSourceHint()}`);
 }
 
 // 6. How the statusline is wired

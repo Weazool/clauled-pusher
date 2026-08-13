@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const CONFIG_PATH = join(homedir(), '.clauled.json');
 const CACHE_PATH  = join(homedir(), '.clauled-port');
-const MODEL_CACHE = join(homedir(), '.clauled-model');
+const MODEL_CACHE = join(homedir(), '.clauled-models.json');
 const DEBUG_PATH  = join(homedir(), '.clauled-debug.log');
 const ESP_VID     = '303A';          // Espressif
 const CACHE_TTL_MS = 5 * 60 * 1000;  // re-scan at most every 5 minutes
@@ -550,7 +550,8 @@ export function readQuota(d) {
     const data = {
       pct: pct100(five.used_percentage),
       resetAt: Number.isFinite(five.resets_at) ? five.resets_at : null,
-      // Recorded because it costs nothing; the device has no third gauge yet.
+      // Sent to the device as gauge3 (v3.7.0+), which alternates row 1
+      // between this and the 5h reading every few seconds.
       week: week && Number.isFinite(week.used_percentage) ? pct100(week.used_percentage) : null,
       weekResetAt: Number.isFinite(week?.resets_at) ? week.resets_at : null,
       source: 'payload',
@@ -723,14 +724,33 @@ export function fmtDuration(ms) {
   return `${s}s`;
 }
 
+/**
+ * A short, stable key for the session this payload belongs to - the first 8
+ * hex characters of Claude Code's own session_id, which is present in both
+ * statusline and hook payloads. Used to key the device's per-session roster
+ * (v3.7.0+) and the model cache below. Empty when session_id is absent,
+ * which just means the push falls into the device's shared fallback slot -
+ * the pre-multi-session behaviour, not an error.
+ */
+export function buildSid(d) {
+  const id = typeof d?.session_id === 'string' ? d.session_id : '';
+  return id.replace(/-/g, '').slice(0, 8);
+}
+
+function readModelCache() {
+  try { return JSON.parse(readFileSync(MODEL_CACHE, 'utf8')); } catch { return {}; }
+}
+
 // Unknown levels fall back to the raw value in buildTitle rather than being
 // dropped - that silently lost "ultra" until it was noticed on the glass.
 /**
- * Header right-hand side: the model alone, e.g. "Opus 5".
+ * Footer left-hand side: the model alone, e.g. "Opus 5".
  *
- * The effort moved to the footer, so there is no longer a joined string to
- * truncate - which is what used to silently drop the effort on longer model
- * names ("Claude Opus 5 (1M context)" became "Claude Opus 5 ").
+ * Cached PER SESSION, not globally - only the statusline payload carries the
+ * model, hook payloads carry effort but not model, so a hook needs somewhere
+ * to recover it from. A single shared cache would leak session A's model
+ * into session B's display the moment they run different models at once;
+ * keying by sid keeps each session's own last-known model separate.
  */
 export function buildTitle(d) {
   let model = (d?.model?.display_name || d?.model?.id || '')
@@ -738,13 +758,18 @@ export function buildTitle(d) {
     .replace(/^Claude\s+/i, '')     // it is a Claude device; saying so twice is waste
     .trim();
 
-  // Only the statusline payload carries the model; hook payloads carry effort
-  // but not model. Cache it from whoever has it so hooks can still render a
-  // complete header instead of wiping the model out entirely.
+  const sid = buildSid(d);
+
   if (model) {
-    try { writeFileSync(MODEL_CACHE, model); } catch {}
-  } else {
-    try { model = readFileSync(MODEL_CACHE, 'utf8').trim(); } catch { model = ''; }
+    if (sid) {
+      const map = readModelCache();
+      if (map[sid] !== model) {
+        map[sid] = model;
+        try { writeFileSync(MODEL_CACHE, JSON.stringify(map)); } catch {}
+      }
+    }
+  } else if (sid) {
+    model = readModelCache()[sid] || '';
   }
   return model.slice(0, 14);
 }
@@ -812,6 +837,12 @@ export function fmtUntil(epochSec) {
 export function buildDisplay(d) {
   const out = { v: 3 };
 
+  // Which session this push belongs to - see buildSid(). Omitted (not sent
+  // as an empty string) when unavailable; the device treats a missing sid
+  // identically to an empty one, so there is nothing to gain by sending "".
+  const sid = buildSid(d);
+  if (sid) out.sid = sid;
+
   const title = buildTitle(d);
   if (title) out.title = title;
 
@@ -835,10 +866,24 @@ export function buildDisplay(d) {
   const round1 = (n) => Math.round(n * 10) / 10;
 
   // Labels are short because the device composes them into a single 21-char
-  // line with the detail and the percentage: "5h lim 4h33m 55%".
+  // line with the detail and the percentage: "5h 4h33m 55%". gauge1/row.left
+  // are account-level on the device (v3.7.0+) - the same value regardless of
+  // which session's push carries it - so there is no per-session logic here
+  // at all, just send what is true right now.
   const quota = readQuota(d);
-  if (quota) out.gauge1 = { label: '5h lim', pct: round1(quota.pct) };
+  if (quota) out.gauge1 = { label: '5h', pct: round1(quota.pct) };
   else maybeRefreshQuota();   // only pay for the API when nothing cheaper has it
+
+  // The weekly (7-day, all models) reading rides on the same rate_limits
+  // block as the 5h one - readQuota() already captures it, it just never had
+  // anywhere to go on the device before. gauge3 is a new, fully optional
+  // field: firmware older than v3.7.0 simply ignores it, and the device only
+  // alternates row 1 with it when it actually arrives.
+  if (quota?.week != null) {
+    const gauge3 = { label: '1w', pct: round1(quota.week) };
+    if (quota.weekResetAt) gauge3.reset = fmtUntil(quota.weekResetAt);
+    out.gauge3 = gauge3;
+  }
 
   const ctx = readContext(d);
   if (ctx) out.gauge2 = { label: 'ctx', pct: round1(Math.min(100, (ctx.used / ctx.size) * 100)) };
