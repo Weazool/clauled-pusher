@@ -75,7 +75,6 @@ const payload = {
   model: { display_name: 'Opus 5 (1M context)' },
   effort: { level: 'medium' },
   context_window: { context_window_size: 1_000_000 },
-  cost: { total_cost_usd: 0 },
   workspace: { current_dir: 'C:/code/proj' },
 };
 
@@ -93,7 +92,7 @@ check('gauge2 pct from transcript ~70', Math.abs((r.sent?.gauge2?.pct ?? 0) - 70
 check('row right is tokens', r.sent?.row?.right === '700k/1M', r.sent?.row?.right);
 const ctxLine = `${r.sent?.gauge2?.label} ${r.sent?.row?.right} 100%`;
 check('context line fits 21 chars at 100%', ctxLine.length <= 21, `${ctxLine.length} - "${ctxLine}"`);
-check('footer is cost', r.sent?.footer?.left === '$0.00', r.sent?.footer?.left);
+check('footer carries no cost', r.sent?.footer?.left === undefined, JSON.stringify(r.sent?.footer));
 check('statusline printed context', /ctx 70%/.test(r.stdout), JSON.stringify(r.stdout));
 
 console.log('\n5h quota from the payload, no token needed');
@@ -148,7 +147,26 @@ check('garbage payload still emits a statusline', r.stdout.trim().length > 0, JS
 console.log('\nbusy states');
 r = await run('busy.mjs', ['prompt'], '{}');
 check('prompt sets a gerund', typeof r.sent?.busy === 'string' && r.sent.busy.length > 3, r.sent?.busy);
-check('busy push carries no gauges', r.sent?.gauge1 === undefined);
+
+console.log('\nhooks recompute EVERYTHING, not just their own field');
+// The whole point of routing busy.mjs and event.mjs through buildDisplay():
+// a hook that only sent its own field (the spinner, or the banner) used to
+// leave session/model/effort/gauges stale until the next statusline render,
+// which can be minutes away. A model or effort change mid-session would sit
+// wrong on the glass for the entire gap. Feed busy.mjs a full-shaped payload
+// and confirm session, effort and BOTH gauges come out fresh in one push -
+// gauge1 (quota) and the context gauge were never sent by a hook at all
+// before this.
+r = await run('busy.mjs', ['prompt'], JSON.stringify({
+  ...payload,
+  effort: { level: 'high' },
+  workspace: { current_dir: 'C:/code/other-project' },
+}));
+check('busy carries the model from cache', r.sent?.title === 'Opus 5', r.sent?.title);
+check('busy carries the session from cwd', r.sent?.session === 'other-project', r.sent?.session);
+check('busy carries the effort fresh from the payload', r.sent?.footer?.right === 'high', r.sent?.footer?.right);
+check('busy carries the cached quota', r.sent?.gauge1?.pct === 26, String(r.sent?.gauge1?.pct));
+check('busy carries context from the transcript', Math.abs((r.sent?.gauge2?.pct ?? 0) - 70) < 0.5, String(r.sent?.gauge2?.pct));
 
 r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'Bash' }));
 check('tool name becomes an activity', r.sent?.busy === 'Running Bash', r.sent?.busy);
@@ -165,6 +183,13 @@ console.log('\nevents');
 r = await run('event.mjs', ['stop'], '{}');
 check('stop raises a banner', r.sent?.events?.[0]?.text === 'Your turn', r.sent?.events?.[0]?.text);
 check('stop clears the spinner', r.sent?.busy === '', JSON.stringify(r.sent?.busy));
+
+// Same regression as busy.mjs: event.mjs used to send only gauge2, so a Stop
+// banner never carried the 5h figure even with a cached reading sitting right
+// there.
+r = await run('event.mjs', ['stop'], JSON.stringify({ ...payload, effort: { level: 'low' } }));
+check('stop also carries the cached quota', r.sent?.gauge1?.pct === 26, String(r.sent?.gauge1?.pct));
+check('stop carries the effort fresh from the payload', r.sent?.footer?.right === 'low', r.sent?.footer?.right);
 
 r = await run('event.mjs', ['notification'], JSON.stringify({ message: 'Permission needed for Bash' }));
 const noteText = r.sent?.events?.[0]?.text ?? '';

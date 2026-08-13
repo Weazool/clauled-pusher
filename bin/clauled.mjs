@@ -469,9 +469,11 @@ foreach ($l in ($out -split "\`r?\`n")) { if ($l.Trim().StartsWith('{')) { Write
 // refreshes. Nothing is created, copied or stored, and it never reaches the
 // device.
 
-const QUOTA_CACHE  = join(homedir(), '.clauled-quota.json');
-const CREDS_PATH   = join(homedir(), '.claude', '.credentials.json');
-const QUOTA_TTL_MS = 5 * 60 * 1000;
+const QUOTA_CACHE   = join(homedir(), '.clauled-quota.json');
+const REFRESH_LOCK  = join(homedir(), '.clauled-quota-refreshing');
+const CREDS_PATH    = join(homedir(), '.claude', '.credentials.json');
+const QUOTA_TTL_MS  = 5 * 60 * 1000;
+const REFRESH_LOCK_TTL_MS = 15 * 1000;  // a real refresh takes a couple of seconds
 
 function readToken() {
   // An explicit token wins. On some setups Claude Code no longer keeps the
@@ -639,6 +641,18 @@ export function maybeRefreshQuota() {
   // the cache stays stale, so we would spawn a doomed child process on EVERY
   // statusline render. Check first.
   if (!readToken()) return;
+
+  // Every hook now recomputes the full display via buildDisplay(), so this can
+  // be called many times in quick succession during a burst of tool calls, not
+  // just once per statusline render. Without a lock, a stale cache would spawn
+  // a fresh refresh child on every single one of those - each making its own
+  // API call against the very quota being measured.
+  try {
+    const lock = JSON.parse(readFileSync(REFRESH_LOCK, 'utf8'));
+    if (Date.now() - lock.at < REFRESH_LOCK_TTL_MS) return;   // one is already in flight
+  } catch { /* no lock, or unreadable - proceed */ }
+  try { writeFileSync(REFRESH_LOCK, JSON.stringify({ at: Date.now() })); } catch {}
+
   try {
     const script = join(dirname(fileURLToPath(import.meta.url)), 'refresh-quota.mjs');
     const child = spawn(process.execPath, [script], { detached: true, stdio: 'ignore' });
@@ -812,12 +826,9 @@ export function buildDisplay(d) {
   if (ctx) row.right = `${fmtTokens(ctx.used)}/${fmtTokens(ctx.size)}`;
   if (Object.keys(row).length) out.row = row;
 
-  const footer = {};
-  const cost = d?.cost?.total_cost_usd;
-  if (typeof cost === 'number') footer.left = '$' + cost.toFixed(2);
+  // Cost is gone - it duplicated a number Claude Code's own UI already shows.
   const effort = buildEffort(d);
-  if (effort) footer.right = effort;
-  if (Object.keys(footer).length) out.footer = footer;
+  if (effort) out.footer = { right: effort };
 
   return out;
 }

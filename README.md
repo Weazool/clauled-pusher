@@ -11,7 +11,7 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.3.0** or later
+- A Clauled device on USB, running **v3.4.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -86,17 +86,39 @@ Always the `cu.*` node, never `tty.*`. The `tty.*` device is the dial-in side, a
 
 ## What gets pushed
 
-| Source | Trigger | Shows on the device |
+Every trigger below pushes the **full display** — session, model, effort, and
+both gauges — plus whatever that trigger exists to add. None of them send a
+partial update anymore:
+
+| Source | Trigger | Adds |
 |---|---|---|
-| statusline | every render | both gauges, header, detail row, cost |
+| statusline | every render | — (this is the only source with the model) |
 | `UserPromptSubmit` | you hit enter | spinner with a gerund — `Discombobulating` |
 | `PreToolUse` | before each tool | the activity — `Running Bash`, `Editing main.cpp` |
 | `Stop` | Claude finished | inverted banner — `Your turn` |
 | `Notification` | needs permission or input | inverted banner — `Claude needs input` |
 
-The device merges pushes, so a hook sending only `busy` never wipes the gauges. It lays out each gauge row itself in three columns — label left, paired detail centred, percentage right — which is why the labels sent here are short (`5h reset`, `ctx`).
+Every push runs through the same `buildDisplay()` the statusline uses, so
+there is one code path deciding what session, model, effort and both gauges
+look like, not four slightly different ones. Session and effort come straight
+from the hook payload and are always current; the gauges come from the cached
+quota and the session transcript, both of which a hook payload can reach.
+**The model is the one exception** — Claude Code's hook payloads never carry
+it, only the statusline's do — so on a hook-only turn it is served from
+whatever the last statusline render cached, and can lag by one render if you
+switch models and prompt again before that render happens.
 
-The four identity fields go to four corners: `session` top-left, `title` (the model) top-right, `footer.left` (cost) bottom-left, `footer.right` (effort) bottom-right. `session_name` is rarely sent by Claude Code, so the workspace directory name is used instead — which is usually what you want anyway, since it names the project.
+The device still merges on top of all this, so a push that could not compute
+something just leaves the last value in place rather than blanking it. It also
+lays out each gauge row itself in three columns — label left, paired detail
+centred, percentage right — which is why the labels sent here are short
+(`5h reset`, `ctx`).
+
+The identity fields go to fixed spots: `session` in the header, centred;
+`title` (the model) at the footer's left; `footer.right` (effort) at the
+footer's right. `session_name` is rarely sent by Claude Code, so the workspace
+directory name is used instead — usually what you want anyway, since it names
+the project.
 
 **A field that could not be computed is omitted, never sent as "no data".** Claude Code does not send the same payload on every invocation — some carry only `{model, effort}`. Emitting a placeholder for the missing feeds meant one of those reduced payloads actively overwrote good readings with `--`. Staying silent leaves the last good value on the glass.
 

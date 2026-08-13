@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, buildTitle, tokenSourceHint } from './clauled.mjs';
 
 let failures = 0;
 const ok   = (m) => console.log(`  ok    ${m}`);
@@ -88,11 +88,12 @@ if (port) {
   console.log('\npush');
   const display = push({
     v: 3,
-    title: 'doctor',
-    gauge1: { label: '5h session', pct: 23 },
-    gauge2: { label: 'Context', pct: 42 },
+    session: 'doctor',
+    title: 'test',
+    gauge1: { label: '5h reset', pct: 23 },
+    gauge2: { label: 'ctx', pct: 42 },
     row: { left: '1h21m', right: '420k/1M' },
-    footer: { left: '$0.00' },
+    footer: { right: 'xhigh' },
   });
   if (display.ok) ok('display push written'); else bad(`display push failed (${display.reason})`);
 
@@ -108,7 +109,14 @@ if (port) {
   // so they sit on the glass until something overwrites them. That can be
   // minutes, and in the meantime the device looks simply wrong.
   if (display.ok) {
-    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }] };
+    const restore = { v: 3, busy: '', events: [{ type: 'clear', text: '' }], session: '' };
+
+    // The model has a real cache of its own (~/.clauled-model), written by
+    // whichever push last carried a real one. Restoring from it beats leaving
+    // "test" on the glass - though it can only ever be as fresh as the last
+    // statusline render, since hooks never carry the model at all.
+    restore.title = buildTitle({});
+
     const q = readCachedQuota();
     if (q) {
       restore.gauge1 = { label: '5h reset', pct: Math.round(q.pct * 10) / 10 };
@@ -118,8 +126,8 @@ if (port) {
     console.log('');
     if (q) ok('test values cleared; the quota gauge is real again');
     else   warn('test values cleared, but there is no cached quota to restore');
-    note('the context gauge and the header still hold doctor\'s values —');
-    note('the next statusline render corrects them');
+    note('the context gauge and the effort corner still hold doctor\'s values —');
+    note('the next statusline render or hook corrects them');
   }
 }
 

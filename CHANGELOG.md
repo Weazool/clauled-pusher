@@ -7,6 +7,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-13
+
+Every hook push now recomputes the full display, not just the field it
+exists to add. Requires firmware **v3.4.0** for the header/footer layout;
+against older firmware the same data still renders, at the old positions.
+
+### Fixed
+- **A hook push only ever updated its own field, leaving everything else
+  stale until the next statusline render.** `busy.mjs` sent the spinner plus
+  title/session/effort but never touched either gauge; `event.mjs` sent the
+  banner plus a context gauge but never the quota gauge. Switch effort or the
+  model mid-session and submit a prompt, and the device could show a mix of
+  fresh and minutes-old numbers depending on which field happened to live in
+  which push. Both hooks now call the same `buildDisplay()` the statusline
+  uses, so every push carries the full state it can compute: session and
+  effort fresh from the payload, both gauges from cache/transcript, model from
+  cache. There is now exactly one code path deciding what the display looks
+  like, used everywhere.
+- **The model still cannot be fresher than the last statusline render on a
+  hook-only turn, and this release does not change that.** Claude Code's hook
+  payloads never carry the model — confirmed against captured payloads, only
+  `effort` is present — so a hook has no way to know it changed. If you switch
+  models and the very next prompt fires before a statusline render happens,
+  the model corner will show the previous one for that one push. Effort and
+  session do not have this problem: hooks carry both directly, and now update
+  on every single push instead of only some.
+- **A burst of hook calls could spawn multiple concurrent quota-refresh
+  processes.** Now that hooks recompute the full display on every push,
+  a stale quota cache would previously trigger a fresh detached refresh child
+  on every one of them — each making its own API call against the very quota
+  being measured. A short-lived lock file now caps this at one refresh in
+  flight at a time, regardless of how many hooks fire in the same burst.
+
+### Changed
+- **`buildDisplay()` no longer sends `footer.left` (cost).** Firmware v3.4.0
+  stopped drawing it; sending it against older firmware was harmless but is
+  now simply dropped at the source instead.
+- `doctor`'s synthetic test push and its post-test restore were updated to
+  match: the restore now clears the test session, restores the model from its
+  own persistent cache (better than leaving `"test"` on the glass), and is
+  explicit that the context gauge and effort corner are the only two fields it
+  cannot restore without a real payload.
+
 ## [3.2.0] - 2026-08-13
 
 Feeds the header and footer that Clauled firmware v3.1.0 removed and v3.3.0
