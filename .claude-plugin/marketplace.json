@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "weazool-clauled",
+  "description": "Clauled - an ESP32 desk display showing Claude subscription usage over USB",
+  "owner": {
+    "name": "Weazool"
+  },
+  "plugins": [
+    {
+      "name": "clauled-pusher",
+      "description": "Pushes Claude Code usage and attention events to a Clauled ESP32 desk display over USB serial",
+      "author": {
+        "name": "Weazool"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/Weazool/clauled-pusher"
+    }
+  ]
+}
