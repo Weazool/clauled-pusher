@@ -8,7 +8,7 @@
 // supersedes the spinner. Both events also clear the busy state, since the turn
 // is over either way.
 
-import { readStdin, debugLog, push, readTranscriptUsage, fmtTokens } from './clauled.mjs';
+import { readStdin, debugLog, push, readTranscriptUsage, fmtTokens, buildTitle } from './clauled.mjs';
 
 const kind = (process.argv[2] || 'event').toLowerCase();
 
@@ -36,6 +36,9 @@ if (typeof payload.message === 'string' && payload.message.trim()) {
 
 // busy:"" ends the spinner in the same push that raises the banner.
 const body = { v: 3, busy: '', events: [{ type: kind, text }] };
+
+const title = buildTitle(payload);
+if (title) body.title = title;
 
 // Refresh context here too. The statusline renders before the turn's usage
 // block is written, so its reading always trails by one message. By the time

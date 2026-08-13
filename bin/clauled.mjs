@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const CONFIG_PATH = join(homedir(), '.clauled.json');
 const CACHE_PATH  = join(homedir(), '.clauled-port');
+const MODEL_CACHE = join(homedir(), '.clauled-model');
 const DEBUG_PATH  = join(homedir(), '.clauled-debug.log');
 const ESP_VID     = '303A';          // Espressif
 const CACHE_TTL_MS = 5 * 60 * 1000;  // re-scan at most every 5 minutes
@@ -394,10 +395,19 @@ const EFFORT_SHORT = {
  */
 export function buildTitle(d) {
   const MAX = 14;
-  const model = (d?.model?.display_name || d?.model?.id || '')
+  let model = (d?.model?.display_name || d?.model?.id || '')
     .replace(/\s*\(.*?\)\s*/g, '')
     .replace(/^Claude\s+/i, '')     // the header already says "Claude"
     .trim();
+
+  // Only the statusline payload carries the model; hook payloads carry effort
+  // but not model. Cache it from whoever has it so hooks can still render a
+  // complete header instead of wiping the model down to just the effort.
+  if (model) {
+    try { writeFileSync(MODEL_CACHE, model); } catch {}
+  } else {
+    try { model = readFileSync(MODEL_CACHE, 'utf8').trim(); } catch { model = ''; }
+  }
 
   // An unrecognised level is still worth showing, trimmed, rather than dropped.
   const raw = d?.effort?.level;

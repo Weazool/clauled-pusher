@@ -7,6 +7,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-08-13
+
+Requires Clauled firmware v3.0.1 for the banner fix.
+
+### Fixed
+- **The header went stale whenever the statusline was quiet.** Only the
+  statusline set the model and effort, so changing effort mid-session left the
+  header showing the old value until the statusline next ran — which can be
+  minutes. Hooks carry the current model and effort in their own payloads and
+  now send the header too.
+- **Hook payloads carry the effort but not the model**, so the header above
+  would have rendered a bare `xhi` and dropped the model entirely. The model is
+  now cached to `~/.clauled-model` by whoever sees one — in practice the
+  statusline — and read back by whoever doesn't, so both paths render a
+  complete header.
+
 ## [3.0.1] - 2026-08-13
 
 ### Fixed
