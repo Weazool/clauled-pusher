@@ -1,18 +1,21 @@
 # clauled-pusher
 
-A Claude Code plugin that pushes your subscription usage and "Claude needs you" events to a [Clauled](https://github.com/Weazool/clauled) ESP32 desk display.
+A Claude Code plugin that pushes your subscription usage and "Claude needs you" events to a [Clauled](https://github.com/Weazool/clauled) ESP32 desk display over USB.
 
 ```
 Claude Code ──statusline──▶ usage %       ┐
-            ──Stop/Notification hooks──▶ events  ├──▶ POST /push ──▶ Clauled ──▶ OLED
+            ──Stop/Notification hooks──▶ events  ├──▶ JSON lines over USB ──▶ Clauled ──▶ OLED
 ```
 
-The device holds no credentials. This plugin holds no Claude token either — usage comes from data Claude Code already hands its statusline.
+No credentials anywhere in the system. The device holds none, and this plugin holds none — usage comes from data Claude Code already hands its statusline.
 
 ## Requirements
 
-- A Clauled device on your network, running v1.0.0 or later
+- A Clauled device on USB, running v2.0.0 or later
 - Claude Code (Node 18+ is already a requirement of it)
+- A **data** USB cable — charge-only cables power the board but never enumerate it
+
+No npm dependencies. Serial writes go through Node's built-in `fs`, and port discovery shells out to PowerShell on Windows — there is no native `serialport` module to build.
 
 ## Install
 
@@ -20,33 +23,15 @@ The device holds no credentials. This plugin holds no Claude token either — us
 git clone https://github.com/Weazool/clauled-pusher
 ```
 
-Add it as a plugin directory in Claude Code, then configure the device connection.
-
-### 1. Configure the device
-
-Create `~/.clauled.json`:
-
-```json
-{
-  "url": "http://clauled.local",
-  "key": "your CLAULED_PUSH_KEY from the firmware",
-  "timeoutMs": 1000
-}
-```
-
-`CLAULED_URL` and `CLAULED_KEY` environment variables override the file if set.
-
-The key must match `CLAULED_PUSH_KEY` in the device's `src/secrets.h`. Changing it on the device means reflashing.
-
-### 2. Verify the connection
+Add it as a plugin directory in Claude Code, then verify the device:
 
 ```bash
 node bin/doctor.mjs
 ```
 
-This checks config, reachability, and both push paths — isolating "device unreachable" from "hook never fired", which are very different problems. Run it before debugging anything else.
+That checks port discovery, does a round-trip status probe, and sends test pushes. Run it before debugging anything else — it isolates "device not reachable" from "the hook never fired", which are very different problems.
 
-### 3. Wire up the statusline
+### Wire up the statusline
 
 **This step is manual and unavoidable.** A plugin cannot ship a `statusLine` — plugin `settings.json` supports only the `agent` and `subagentStatusLine` keys. Add to `~/.claude/settings.json`:
 
@@ -63,6 +48,20 @@ The statusline prints `5h 23%  7d 41%` back to Claude Code, so it replaces whate
 
 Events need no manual step — the `Stop` and `Notification` hooks ship inside the plugin.
 
+## Plug and play
+
+The device is found by its Espressif USB vendor ID (`303A`), not by a hardcoded port. **Move it to a different USB socket and it keeps working** — no configuration to update.
+
+Discovery is cached for five minutes so the statusline does not pay for a scan on every render. If a write fails, the port is re-detected immediately and the push retried once, so replugging recovers by itself without waiting for the cache to expire.
+
+You only need `~/.clauled.json` if you want to override detection:
+
+```json
+{ "port": "COM8" }
+```
+
+`CLAULED_PORT` in the environment overrides both.
+
 ## What gets pushed
 
 | Source | Trigger | Payload |
@@ -75,11 +74,19 @@ Events need no manual step — the `Stop` and `Notification` hooks ship inside t
 
 The device merges pushes, so an events-only push never wipes the usage bars.
 
+## Testing without the device
+
+```bash
+node bin/selftest.mjs
+```
+
+Points `CLAULED_PORT` at a temp file, runs the real scripts, and asserts on the exact bytes they write. Verifies the `resets_at` → `resets_in` conversion, the alternate field-name handling, and that an unrecognised payload pushes nothing.
+
 ## Known caveat: the statusline schema is unverified
 
 Usage extraction reads the `rate_limits` object Claude Code passes to the statusline. **The exact field names have not been confirmed against a live payload** — they come from documentation, not observation.
 
-`extractUsage()` in `bin/clauled.mjs` therefore accepts several plausible spellings (`used_percentage`, `usedPercentage`, `utilization`, `pct`) and handles `resets_at` as epoch seconds, epoch milliseconds, or an ISO string. If the real shape differs from all of them, no usage is pushed and the statusline prints `clauled: no usage data`.
+`extractUsage()` in `bin/clauled.mjs` therefore accepts several plausible spellings (`used_percentage`, `usedPercentage`, `utilization`, `pct`) and handles `resets_at` as epoch seconds, epoch milliseconds, or an ISO string. If the real shape differs from all of them, nothing is pushed and the statusline prints `clauled: no usage data`.
 
 To capture the real payload:
 
@@ -97,17 +104,11 @@ On Windows, Claude Code runs hook commands through **CMD.exe**. `.sh` files don'
 
 `node` is on PATH on every platform, and `${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code before the shell sees the command. So a Node entry point is cross-platform with no wrapper.
 
-## Performance
-
-Hooks block the session while they run, so every push is capped by `timeoutMs` (default 1000 ms) and never throws. The hooks are also declared `async: true` so they don't add latency to your turns. If your Claude Code build rejects that field, remove it from `hooks/hooks.json` — the timeout still bounds the delay.
-
 ## Troubleshooting
 
-**`doctor` says the key is not set.** Create `~/.clauled.json` or export `CLAULED_KEY`.
+**`doctor` says no device found.** Check the cable carries data, and that the board enumerates — it should appear as a USB serial device with vendor ID `303A`.
 
-**Pushes return 401.** The key doesn't match the firmware's `CLAULED_PUSH_KEY`. Reflash the device to change it.
-
-**Device unreachable but works in a browser.** mDNS may be blocked between network segments. Put the raw IP in `~/.clauled.json`.
+**`no reply` from the status probe.** Another program is probably holding the port. Close `pio device monitor` or any serial terminal; only one process can own a COM port.
 
 **Statusline shows `clauled: no usage data`.** Either the payload has no `rate_limits` yet (it appears after the first API response), or the field names differ. Capture the payload with `CLAULED_DEBUG=1`.
 

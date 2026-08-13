@@ -1,6 +1,7 @@
 {
-  "_comment": "Copy to ~/.clauled.json and fill in your push key. Do not commit the real file.",
-  "url": "http://clauled.local",
-  "key": "",
-  "timeoutMs": 1000
+  "_comment": "Optional. Only needed to override auto-detection - the device is normally found by its Espressif USB vendor ID (303A). Copy to ~/.clauled.json if you need it.",
+  "_windows": "COM8",
+  "_linux": "/dev/ttyACM0",
+  "_macos": "/dev/cu.usbmodem14201",
+  "port": ""
 }

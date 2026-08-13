@@ -3,53 +3,35 @@
 //
 //   node bin/selftest.mjs
 //
-// Spins up a local mock endpoint, runs the real statusline and event scripts
-// against it, and asserts on what they actually POST. Use this when the device
-// is unplugged, or to check a change to extractUsage() before flashing anything.
+// Points CLAULED_PORT at a temp file, runs the real statusline and event
+// scripts, and asserts on the exact bytes they write. Use this when the device
+// is unplugged, or to check a change to extractUsage() before flashing.
 
-import { createServer } from 'node:http';
+import { readFileSync, writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const BIN = dirname(fileURLToPath(import.meta.url));
-const PORT = 8787;
-const received = [];
-
-const server = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
-  req.on('end', () => {
-    received.push({
-      path: req.url,
-      key: req.headers['x-clauled-key'] ?? null,
-      body: (() => {
-        try {
-          return JSON.parse(body);
-        } catch {
-          return body;
-        }
-      })(),
-    });
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end('{"ok":true}');
-  });
-});
-
-await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
-
-const env = {
-  ...process.env,
-  CLAULED_URL: `http://127.0.0.1:${PORT}`,
-  CLAULED_KEY: 'selftest-key',
-};
+const TMP = mkdtempSync(join(tmpdir(), 'clauled-selftest-'));
+const FAKE_PORT = join(TMP, 'fake-port');
 
 function run(script, args, stdin) {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [join(BIN, script), ...args], { env });
+    writeFileSync(FAKE_PORT, '');
+    const p = spawn(process.execPath, [join(BIN, script), ...args], {
+      env: { ...process.env, CLAULED_PORT: FAKE_PORT },
+    });
     let out = '';
     p.stdout.on('data', (c) => (out += c));
-    p.on('close', () => resolve(out));
+    p.on('close', () => {
+      let written = '';
+      try { written = readFileSync(FAKE_PORT, 'utf8'); } catch {}
+      let parsed = null;
+      try { parsed = JSON.parse(written.trim()); } catch {}
+      resolve({ stdout: out, raw: written, sent: parsed });
+    });
     p.stdin.write(stdin);
     p.stdin.end();
   });
@@ -62,71 +44,54 @@ const check = (name, cond, detail = '') => {
 };
 
 const nowSec = Math.floor(Date.now() / 1000);
-
-console.log('\nclauled-pusher selftest\n');
+console.log('\nclauled-pusher selftest (serial transport)\n');
 
 // --- documented shape: used_percentage + resets_at as epoch seconds ---
 console.log('statusline, documented schema');
-const line = await run('statusline.mjs', [], JSON.stringify({
+let r = await run('statusline.mjs', [], JSON.stringify({
   rate_limits: {
     five_hour: { used_percentage: 23.5, resets_at: nowSec + 4920 },
     seven_day: { used_percentage: 41.2, resets_at: nowSec + 340000 },
   },
 }));
-const usagePush = received.find((r) => r.body?.usage);
-check('pushed to /push', usagePush?.path === '/push');
-check('sent the key header', usagePush?.key === 'selftest-key');
-check('5h pct preserved', usagePush?.body?.usage?.five_hour?.pct === 23.5);
-check(
-  '5h resets_at converted to seconds remaining',
-  Math.abs((usagePush?.body?.usage?.five_hour?.resets_in ?? 0) - 4920) <= 2,
-  `got ${usagePush?.body?.usage?.five_hour?.resets_in}`,
-);
-check('7d present', usagePush?.body?.usage?.seven_day?.pct === 41.2);
-check('schema version tagged', usagePush?.body?.v === 1);
-check('statusline printed something', line.trim().length > 0, JSON.stringify(line));
+check('wrote a line to the port', r.raw.endsWith('\n'), JSON.stringify(r.raw.slice(-3)));
+check('payload is valid JSON', r.sent !== null);
+check('schema version tagged', r.sent?.v === 1);
+check('5h pct preserved', r.sent?.usage?.five_hour?.pct === 23.5);
+check('5h resets_at -> seconds remaining',
+  Math.abs((r.sent?.usage?.five_hour?.resets_in ?? 0) - 4920) <= 2,
+  `got ${r.sent?.usage?.five_hour?.resets_in}`);
+check('7d present', r.sent?.usage?.seven_day?.pct === 41.2);
+check('statusline printed something', r.stdout.trim().length > 0, JSON.stringify(r.stdout));
 
 // --- alternate spellings: utilization + ISO timestamp ---
 console.log('\nstatusline, alternate spellings');
-received.length = 0;
-await run('statusline.mjs', [], JSON.stringify({
-  rateLimits: {
-    fiveHour: { utilization: 77, resetsAt: new Date(Date.now() + 600_000).toISOString() },
-  },
+r = await run('statusline.mjs', [], JSON.stringify({
+  rateLimits: { fiveHour: { utilization: 77, resetsAt: new Date(Date.now() + 600_000).toISOString() } },
 }));
-const alt = received.find((r) => r.body?.usage);
-check('utilization accepted as pct', alt?.body?.usage?.five_hour?.pct === 77);
-check(
-  'ISO resetsAt converted',
-  Math.abs((alt?.body?.usage?.five_hour?.resets_in ?? 0) - 600) <= 3,
-  `got ${alt?.body?.usage?.five_hour?.resets_in}`,
-);
+check('utilization accepted as pct', r.sent?.usage?.five_hour?.pct === 77);
+check('ISO resetsAt converted',
+  Math.abs((r.sent?.usage?.five_hour?.resets_in ?? 0) - 600) <= 3,
+  `got ${r.sent?.usage?.five_hour?.resets_in}`);
 
 // --- unrecognised payload must not push garbage ---
 console.log('\nstatusline, unrecognised payload');
-received.length = 0;
-const fallback = await run('statusline.mjs', [], JSON.stringify({ something: 'else' }));
-check('no push attempted', received.length === 0, `${received.length} request(s)`);
-check('still printed a statusline', fallback.trim().length > 0, JSON.stringify(fallback));
+r = await run('statusline.mjs', [], JSON.stringify({ something: 'else' }));
+check('nothing written', r.raw.length === 0, `${r.raw.length} bytes`);
+check('still printed a statusline', r.stdout.trim().length > 0, JSON.stringify(r.stdout));
 
 // --- events ---
 console.log('\nevents');
-received.length = 0;
-await run('event.mjs', ['stop'], '{}');
-const stopEv = received[0];
-check('stop pushed an event', Array.isArray(stopEv?.body?.events));
-check('stop has attention type', stopEv?.body?.events?.[0]?.type === 'attention');
-check('stop carries no usage key', stopEv?.body?.usage === undefined);
+r = await run('event.mjs', ['stop'], '{}');
+check('stop pushed an event', Array.isArray(r.sent?.events));
+check('stop has attention type', r.sent?.events?.[0]?.type === 'attention');
+check('stop carries no usage key', r.sent?.usage === undefined);
 
-received.length = 0;
-await run('event.mjs', ['notification'], JSON.stringify({ message: 'Permission needed for Bash' }));
-const noteEv = received[0];
-check(
-  'notification uses its own message',
-  noteEv?.body?.events?.[0]?.text === 'Permission needed for Bash',
-  noteEv?.body?.events?.[0]?.text,
-);
+r = await run('event.mjs', ['notification'], JSON.stringify({ message: 'Permission needed for Bash' }));
+check('notification uses its own message',
+  r.sent?.events?.[0]?.text === 'Permission needed for Bash',
+  r.sent?.events?.[0]?.text);
 
-server.close();
+try { unlinkSync(FAKE_PORT); } catch {}
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} check(s) failed.\n`);
 process.exit(failures === 0 ? 0 : 1);
