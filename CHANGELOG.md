@@ -7,6 +7,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-08-13
+
+### Fixed
+- **An unrecognised effort level was silently dropped from the header.** `ultra`
+  was not in the abbreviation table, so the lookup returned undefined and the
+  effort simply vanished — the header read `Opus 5` with no explanation.
+  Unknown levels now fall back to the raw value, and `ultra` is mapped.
+- **Long model names dropped the effort too.** The joined string was truncated
+  to the header's 14 characters, so `Claude Opus 5 (1M context)` became
+  `Claude Opus 5 ` with the effort cut off. The effort's room is now reserved
+  first and the model shortened instead. A leading `Claude ` is also stripped,
+  since the header already says it.
+- **Context reading trailed by one message.** The statusline renders before the
+  turn's usage block is written to the transcript, so it always showed the
+  previous turn's figure. The `Stop` hook now recomputes context from the
+  transcript, which is current by the time it fires.
+
 ## [3.0.0] - 2026-08-13
 
 Real data at last. Requires Clauled firmware v3.0.0.

@@ -373,15 +373,39 @@ export function fmtDuration(ms) {
   return `${s}s`;
 }
 
-const EFFORT_SHORT = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhi', max: 'max' };
+// Unknown levels fall back to the raw value in buildTitle rather than being
+// dropped - that silently lost "ultra" until it was noticed on the glass.
+const EFFORT_SHORT = {
+  low: 'low',
+  medium: 'med',
+  high: 'high',
+  xhigh: 'xhi',
+  ultra: 'ult',
+  max: 'max',
+};
 
-/** Header right-hand side: model plus effort, e.g. "Opus 5 med". */
+/**
+ * Header right-hand side: model plus effort, e.g. "Opus 5 med".
+ *
+ * The header has 14 characters to the right of "Claude". Truncating the joined
+ * string would silently drop the effort on longer model names - "Claude Opus 5
+ * (1M context)" became "Claude Opus 5 " with the effort gone. Reserve the
+ * effort's room first and shorten the model instead.
+ */
 export function buildTitle(d) {
+  const MAX = 14;
   const model = (d?.model?.display_name || d?.model?.id || '')
     .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/^Claude\s+/i, '')     // the header already says "Claude"
     .trim();
-  const effort = EFFORT_SHORT[d?.effort?.level] ?? '';
-  return [model, effort].filter(Boolean).join(' ').slice(0, 14);
+
+  // An unrecognised level is still worth showing, trimmed, rather than dropped.
+  const raw = d?.effort?.level;
+  const effort = raw ? (EFFORT_SHORT[raw] ?? String(raw).slice(0, 4)) : '';
+
+  if (!effort) return model.slice(0, MAX);
+  const room = MAX - effort.length - 1;
+  return `${model.slice(0, Math.max(0, room))} ${effort}`.trim();
 }
 
 /** "1h21m" until an absolute epoch, for the 5h reset countdown. */

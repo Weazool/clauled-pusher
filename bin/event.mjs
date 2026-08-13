@@ -8,7 +8,7 @@
 // supersedes the spinner. Both events also clear the busy state, since the turn
 // is over either way.
 
-import { readStdin, debugLog, push } from './clauled.mjs';
+import { readStdin, debugLog, push, readTranscriptUsage, fmtTokens } from './clauled.mjs';
 
 const kind = (process.argv[2] || 'event').toLowerCase();
 
@@ -35,7 +35,19 @@ if (typeof payload.message === 'string' && payload.message.trim()) {
 }
 
 // busy:"" ends the spinner in the same push that raises the banner.
-await push({ v: 3, busy: '', events: [{ type: kind, text }] });
+const body = { v: 3, busy: '', events: [{ type: kind, text }] };
+
+// Refresh context here too. The statusline renders before the turn's usage
+// block is written, so its reading always trails by one message. By the time
+// Stop fires the transcript is current, which closes that gap.
+const size = payload?.context_window?.context_window_size || 1_000_000;
+const usage = readTranscriptUsage(payload?.transcript_path);
+if (usage && size) {
+  body.gauge2 = { label: 'Context', pct: Math.round(Math.min(100, (usage.used / size) * 100) * 10) / 10 };
+  body.row = { right: `${fmtTokens(usage.used)}/${fmtTokens(size)}` };
+}
+
+await push(body);
 
 // Hooks must exit 0. A failed push is not a reason to disrupt the session.
 process.exit(0);
