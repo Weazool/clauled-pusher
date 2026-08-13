@@ -11,7 +11,7 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.7.0** or later
+- A Clauled device on USB, running **v3.8.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
@@ -77,9 +77,9 @@ Labels stay short (`5h`, `1w`, `ctx`) — the device composes each into one line
 
 ## Multiple sessions
 
-Every push is tagged with `sid`, an 8-character key derived from Claude Code's own `session_id`. The device (firmware v3.7.0+) tracks up to 8 concurrent sessions from that tag alone — no coordination needed on this side — and rotates between whichever need attention, or are working, or are just idle, every few seconds. See the firmware's [API.md](https://github.com/Weazool/clauled/blob/main/API.md) for the full rotation and priority rules.
+Every push is tagged with `sid`, an 8-character key derived from Claude Code's own `session_id`. The device (firmware v3.7.0+) tracks up to 8 concurrent sessions from that tag alone — no coordination needed on this side — and cycles through all of them in turn, every 6 seconds (firmware v3.8.0+; v3.7.0 instead prioritises attention over working over idle). See the firmware's [API.md](https://github.com/Weazool/clauled/blob/main/API.md) for the exact rotation and roster rules.
 
-The one thing this plugin does own per session: the **model cache**. Hook payloads never carry the model, only the statusline's do, so each session's last-known model is cached separately, keyed by its own `sid` — otherwise session A's model would leak into session B's display the moment they run different ones.
+The one thing this plugin does own per session: the **model cache**. Hook payloads never carry the model, only the statusline's do, so each session's last-known model is cached separately, keyed by its own `sid` — otherwise session A's model would leak into session B's display the moment they run different ones. If a session's statusline never renders at all — some environments never invoke it — the model instead falls back to whatever the session transcript last recorded, so the footer still isn't left blank.
 
 ## The two account gauges
 

@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, loadConfig, readCachedQuota, fmtUntil, isQuietHours, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, sleepSync, loadConfig, readCachedQuota, fmtUntil, isQuietHours, tokenSourceHint } from './clauled.mjs';
 
 // A dedicated, fake session id - so the test push lands in its OWN roster
 // slot on the device (v3.7.0+) rather than colliding with a real session or
@@ -82,7 +82,15 @@ if (port) {
     const s = r.status;
     note(`version=${s.version} display_ok=${s.display_ok} uptime=${s.uptime}s last_push_age=${s.last_push_age}`);
     if (typeof s.sessions === 'number') {
-      note(`sessions in the roster right now: ${s.sessions}${s.sessions > 1 ? ' - rotating every 3s' : ''}`);
+      note(`sessions in the roster right now: ${s.sessions}${s.sessions > 1 ? ' - rotating every 6s' : ''}`);
+    }
+    if (Array.isArray(s.roster) && s.roster.length) {
+      for (const r of s.roster) {
+        const bits = [r.sid || '(no sid)', r.name ? `"${r.name}"` : '(no name)', `pushed ${r.age}s ago`];
+        if (r.event) bits.push(`event: "${r.event}"`);
+        if (r.busy) bits.push(`busy: "${r.busy}"`);
+        note(`  - ${bits.join('  ')}`);
+      }
     }
     if (s.display_ok === false) {
       note('note: display not detected - device runs headless, pushes still work');
@@ -99,6 +107,12 @@ if (port) {
   }
 
   // 4. Push paths
+  //
+  // Pushes are paced with sleepSync() between them - see push()'s doc comment
+  // in clauled.mjs. Firing this many in immediate succession reliably lost
+  // the tail of the burst on real hardware: the device parses JSON and
+  // redraws the whole panel before it reads more serial, and a normal hook
+  // only ever sends one push at a time, so nothing else exercises this.
   console.log('\npush');
   const display = push({
     v: 3,
@@ -114,6 +128,7 @@ if (port) {
   });
   if (display.ok) ok('display push written'); else bad(`display push failed (${display.reason})`);
 
+  sleepSync(150);
   const event = push({ v: 3, sid: DOCTOR_SID, busy: '', events: [{ type: 'attention', text: 'doctor test' }] });
   if (event.ok) ok('event push written'); else bad(`event push failed (${event.reason})`);
 
@@ -138,19 +153,44 @@ if (port) {
     if (q) {
       restore.gauge1 = { label: '5h', pct: Math.round(q.pct * 10) / 10 };
       if (q.resetAt) restore.row = { left: fmtUntil(q.resetAt) };
-      if (q.week != null) {
-        restore.gauge3 = { label: '1w', pct: Math.round(q.week * 10) / 10 };
-        if (q.weekResetAt) restore.gauge3.reset = fmtUntil(q.weekResetAt);
-      }
     }
-    push(restore);
+    // gauge3 (the weekly reading) has no token fallback, so there may be
+    // nothing real cached to restore it TO. pct:-1 tells the device to hide
+    // the weekly row again (hasWeek goes false on the device) rather than
+    // leaving doctor's fake 61%/"3d4h" on screen with no real value to
+    // correct it - previously that stuck around until a live payload
+    // happened to carry rate_limits.seven_day again, which in a session
+    // whose statusline never renders may be a very long time.
+    if (q?.week != null) {
+      restore.gauge3 = { label: '1w', pct: Math.round(q.week * 10) / 10 };
+      if (q.weekResetAt) restore.gauge3.reset = fmtUntil(q.weekResetAt);
+    } else {
+      restore.gauge3 = { pct: -1 };
+    }
+    sleepSync(150);
+    const restored = push(restore);
+
+    // Remove doctor's own slot immediately rather than leaving it to age out
+    // over SESSION_GONE_S (15 min) - otherwise every doctor run inflates the
+    // session count for a quarter of an hour after the fact.
+    sleepSync(150);
+    const forgotten = push({ v: 3, cmd: 'forget', sid: DOCTOR_SID });
+
     console.log('');
-    if (q) ok('test values cleared; the quota gauges are real again');
-    else   warn('test values cleared, but there is no cached quota to restore');
+    if (!restored.ok) {
+      bad(`restore push failed (${restored.reason}) - the test values are still on screen`);
+    } else if (q && q.week != null) {
+      ok('test values cleared; both quota gauges are real again');
+    } else if (q) {
+      ok('test values cleared; 5h is real again');
+      note('1w has no cached reading yet, so its test value was hidden rather than restored');
+    } else {
+      warn('test values cleared, but there is no cached quota to restore');
+    }
     note('the context gauge and effort corner still hold doctor\'s values —');
     note('the next statusline render or hook corrects them');
-    note(`doctor's own "doctor" session stays in the roster up to SESSION_GONE_S`);
-    note('(15 min default) before ageing out on its own - harmless, just cosmetic');
+    if (forgotten.ok) note('doctor\'s own "doctor" session has been removed from the roster');
+    else bad(`could not remove doctor's session from the roster (${forgotten.reason}) - it will age out on its own within SESSION_GONE_S (15 min)`);
   }
 }
 

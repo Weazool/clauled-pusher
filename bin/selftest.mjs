@@ -32,11 +32,13 @@ mkdirSync(HOME);
 const QUOTA_CACHE = join(HOME, '.clauled-quota.json');
 const clearQuota = () => { try { rmSync(QUOTA_CACHE); } catch { /* already absent */ } };
 
-// A transcript whose newest usage block puts context at 70%.
+// A transcript whose newest usage block puts context at 70% and was produced
+// by Sonnet 5 - the raw API id, same shape buildTitle()'s transcript fallback
+// has to reshape into "Sonnet 5".
 writeFileSync(TRANSCRIPT, [
   JSON.stringify({ message: { usage: { input_tokens: 1, cache_read_input_tokens: 100_000 } } }),
   JSON.stringify({ message: { role: 'user' } }),
-  JSON.stringify({ message: { usage: { input_tokens: 2, cache_creation_input_tokens: 1_390, cache_read_input_tokens: 698_608, output_tokens: 1_760 } } }),
+  JSON.stringify({ message: { model: 'claude-sonnet-5', usage: { input_tokens: 2, cache_creation_input_tokens: 1_390, cache_read_input_tokens: 698_608, output_tokens: 1_760 } } }),
 ].join('\n') + '\n');
 
 function run(script, args, stdin) {
@@ -233,6 +235,25 @@ r = await run('busy.mjs', ['tool'], JSON.stringify({
   tool_name: 'Bash',
 }));
 check('the first session still recovers ITS OWN model, unaffected by the second', r.sent?.title === 'Opus 5', r.sent?.title);
+
+console.log('\nmodel falls back to the transcript when neither the payload nor the cache has it');
+// Some environments never invoke the statusline at all - the only push that
+// ever carries d.model - which would otherwise leave a session's footer
+// permanently blank even after real work has happened. The transcript
+// already carries the model on every assistant message (same file the
+// context gauge reads), so a hook-only session can still recover it.
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  session_id: 'ffff7777-0000-1111-2222-333344445555',   // a session never seen before
+  transcript_path: TRANSCRIPT,
+  tool_name: 'Bash',
+}));
+check('model recovered from the transcript', r.sent?.title === 'Sonnet 5', r.sent?.title);
+
+r = await run('busy.mjs', ['tool'], JSON.stringify({
+  session_id: 'ffff7777-0000-1111-2222-333344445555',
+  tool_name: 'Read',
+}));
+check('and is now cached, so a later push with no transcript still has it', r.sent?.title === 'Sonnet 5', r.sent?.title);
 
 r = await run('busy.mjs', ['tool'], JSON.stringify({ tool_name: 'Bash' }));
 check('tool name becomes an activity', r.sent?.busy === 'Running Bash', r.sent?.busy);

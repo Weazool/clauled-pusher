@@ -282,13 +282,26 @@ function writeLine(path, line) {
   }
 }
 
-/** Block briefly without pulling in a timer. Only used on a port collision. */
-function sleepSync(ms) {
+/**
+ * Block briefly without pulling in a timer. Used internally on a port
+ * collision, and exported for callers that fire several pushes in a row
+ * (doctor.mjs) - see push()'s doc comment for why that needs pacing.
+ */
+export function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* best effort */ }
 }
 
 /**
  * Send one JSON object as a line. Always resolves - never throws, never hangs.
+ *
+ * A single push is reliable, but firing several in immediate succession is
+ * NOT: each accepted line makes the device parse JSON and redraw the whole
+ * panel (an SPI transfer) before it reads more serial, and this call reopens
+ * the port fresh every time rather than reusing a handle. Two or three pushes
+ * with no gap between them can outrun that and get silently dropped -
+ * confirmed on real hardware, not theoretical. A normal hook only ever sends
+ * one push, so this does not matter there; a caller that sends several in a
+ * row (doctor.mjs) must pace them with sleepSync() between calls.
  *
  * Two failure classes need different remedies:
  *   EPERM/EBUSY/EACCES - another process holds the port for an instant. In
@@ -439,23 +452,40 @@ foreach ($l in ($out -split "\`r?\`n")) { if ($l.Trim().StartsWith('{')) { Write
   const exe = psExe({ needSerialPort: true });
   if (!exe) return { ok: false, port: path, reason: 'Windows PowerShell 5.1 not found' };
 
-  try {
-    const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', ps], {
-      encoding: 'utf8',
-      timeout: 12000,
-      windowsHide: true,
-      // Inheriting stderr dumped a raw .NET stack trace into the user's
-      // terminal, which doctor then misdiagnosed as "another program is
-      // holding the port". Capture it and report the first line instead.
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const line = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.startsWith('{')).pop();
-    if (!line) return { ok: false, port: path, reason: 'no reply' };
-    return { ok: true, port: path, status: JSON.parse(line) };
-  } catch (err) {
-    const detail = String(err?.stderr ?? '').split('\n').map((s) => s.trim()).filter(Boolean)[0];
-    return { ok: false, port: path, reason: detail || err?.message?.split('\n')[0] || 'probe failed' };
+  // Up to 3 attempts. A device mid-redraw when the query line arrives can
+  // occasionally reply {"error":"bad JSON"} to an otherwise well-formed
+  // request - reproduced on real hardware under heavy push load, not
+  // theoretical - and a genuine status reply always has .version, so that is
+  // what distinguishes a retriable hiccup from an actually unreachable
+  // device. One retry clears it without making a healthy probe noticeably
+  // slower.
+  let lastReason = 'no reply';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', ps], {
+        encoding: 'utf8',
+        timeout: 12000,
+        windowsHide: true,
+        // Inheriting stderr dumped a raw .NET stack trace into the user's
+        // terminal, which doctor then misdiagnosed as "another program is
+        // holding the port". Capture it and report the first line instead.
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const line = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.startsWith('{')).pop();
+      if (!line) { lastReason = 'no reply'; continue; }
+      let status;
+      try { status = JSON.parse(line); } catch { lastReason = 'malformed reply'; continue; }
+      if (status.version === undefined) {
+        lastReason = status.error ? `device replied: ${status.error}` : 'unexpected reply shape';
+        continue;
+      }
+      return { ok: true, port: path, status };
+    } catch (err) {
+      const detail = String(err?.stderr ?? '').split('\n').map((s) => s.trim()).filter(Boolean)[0];
+      lastReason = detail || err?.message?.split('\n')[0] || 'probe failed';
+    }
   }
+  return { ok: false, port: path, reason: lastReason };
 }
 
 // ── 5h subscription quota ─────────────────────────────────────
@@ -622,6 +652,21 @@ export async function refreshQuota() {
       pct: Math.max(0, Math.min(100, util * 100)),
       resetAt: Number.isFinite(reset) ? reset : null,
     };
+
+    // This call only ever learns the 5h figure - there is no weekly-quota
+    // equivalent header. Carry forward whatever a previous statusline payload
+    // already established for the weekly reading rather than silently drop
+    // it: writing {pct, resetAt} alone here would overwrite a cache that
+    // previously had week/weekResetAt, and nothing else ever repopulates them
+    // except a live payload's rate_limits.seven_day block - which, in a
+    // session that never renders a statusline, may not arrive again for a
+    // long time, if ever.
+    const prev = readCachedQuota();
+    if (prev?.week != null) {
+      data.week = prev.week;
+      data.weekResetAt = prev.weekResetAt ?? null;
+    }
+
     try { writeFileSync(QUOTA_CACHE, JSON.stringify({ at: Date.now(), data })); } catch {}
     return { ok: true, data };
   } catch (err) {
@@ -670,8 +715,10 @@ export function maybeRefreshQuota() {
 // is computed from there.
 
 /**
- * Read the newest usage block from a transcript. Only the tail is read - these
- * files reach multiple megabytes and this runs on every statusline render.
+ * Read the newest usage block from a transcript, alongside the model that
+ * produced it (same line - an assistant message carries both). Only the tail
+ * is read - these files reach multiple megabytes and this runs on every
+ * statusline render.
  */
 export function readTranscriptUsage(path) {
   if (!path) return null;
@@ -697,16 +744,35 @@ export function readTranscriptUsage(path) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i].trim();
     if (!l.startsWith('{')) continue;
-    let u;
-    try { u = JSON.parse(l)?.message?.usage; } catch { continue; }
+    let msg;
+    try { msg = JSON.parse(l)?.message; } catch { continue; }
+    const u = msg?.usage;
     if (!u) continue;
     const used =
       (u.input_tokens || 0) +
       (u.cache_read_input_tokens || 0) +
       (u.cache_creation_input_tokens || 0);
-    if (used > 0) return { used, output: u.output_tokens || 0 };
+    if (used > 0) {
+      return { used, output: u.output_tokens || 0, model: typeof msg.model === 'string' ? msg.model : '' };
+    }
   }
   return null;
+}
+
+/**
+ * The transcript records the model's raw API id ("claude-sonnet-5",
+ * "claude-haiku-4-5-20251001"), not the display name a statusline payload
+ * carries ("Sonnet 5") - reshape it the same way buildTitle() does, so a
+ * transcript-sourced fallback reads identically to a normal one.
+ */
+function friendlyModelName(id) {
+  return String(id)
+    .replace(/^claude-/, '')
+    .replace(/-\d{8}$/, '')          // trailing snapshot date, e.g. -20251001
+    .split('-')
+    .map((part, i) => (i === 0 && part ? part[0].toUpperCase() + part.slice(1) : part))
+    .join(' ')
+    .replace(/(\d) (\d)/, '$1.$2');  // "4 5" -> "4.5"
 }
 
 export function fmtTokens(n) {
@@ -770,6 +836,23 @@ export function buildTitle(d) {
     }
   } else if (sid) {
     model = readModelCache()[sid] || '';
+
+    // The per-sid cache is only ever populated BY a statusline render - the
+    // one payload that carries d.model. Some environments never invoke the
+    // statusline at all (no terminal status bar to keep current), which would
+    // otherwise leave a session's footer permanently blank even once it has
+    // done real work. The transcript is a slower fallback - it needs at least
+    // one completed turn - but it is real data, from the same file
+    // readContext() already reads for the context gauge.
+    if (!model) {
+      const t = readTranscriptUsage(d?.transcript_path);
+      if (t?.model) {
+        model = friendlyModelName(t.model);
+        const map2 = readModelCache();
+        map2[sid] = model;
+        try { writeFileSync(MODEL_CACHE, JSON.stringify(map2)); } catch {}
+      }
+    }
   }
   return model.slice(0, 14);
 }

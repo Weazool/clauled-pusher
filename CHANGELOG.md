@@ -7,6 +7,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-08-13
+
+Requires Clauled firmware **v3.8.0** for the invert-scope, flat rotation,
+roster, and guardrail changes on the device side; against older firmware
+those pushes are simply ignored or rendered the old way.
+
+### Added
+- **The footer's model falls back to the session transcript** when neither
+  the payload nor the per-sid cache has it. The per-sid model cache is only
+  ever populated by a statusline render — the one payload carrying
+  `d.model` — but some environments never invoke the statusline at all,
+  which used to leave that session's footer permanently blank even after
+  real work had happened. The transcript already records the model on every
+  assistant message (the same file the context gauge reads); reshaped from
+  its raw API id (`claude-sonnet-5`) into the same short form a statusline
+  render would have produced (`Sonnet 5`).
+- **`doctor.mjs` prints the live roster** (`sid`, name, age, and any live
+  event/busy) from the device's new `roster` field, not just the bare count.
+
+### Fixed
+- **The weekly (1w) quota cache could silently lose its reading.** The
+  token-based 5h refresh (`refreshQuota()`) only ever learns the 5h figure —
+  there is no equivalent header for the weekly one — but it was overwriting
+  the *entire* quota cache file on every run, discarding whatever `week`/
+  `weekResetAt` a previous statusline payload had already established. It now
+  merges, carrying the weekly reading forward instead of dropping it.
+- **`doctor.mjs`'s own test session used to linger in the device's roster for
+  up to 15 minutes after every run**, inflating the session count for anyone
+  who happened to check in that window. It now calls the device's new
+  `forget` command on its own `sid` immediately after restoring the real
+  values, and restores the weekly gauge with `pct:-1` (hide it) rather than
+  leaving a fake reading on screen when there is nothing real cached to
+  restore it to.
+- **`doctor.mjs` fired its four diagnostic pushes back-to-back with no
+  gap**, which could reliably outrun the device (each push makes it parse
+  JSON and redraw the whole panel before it reads more serial) and silently
+  drop the tail of the burst — confirmed on real hardware, not theoretical.
+  Pushes are now paced with a short delay between them, and `doctor.mjs`
+  checks each push's actual result instead of assuming success.
+- **`probeStatus()` on Windows could occasionally get back
+  `{"error":"bad JSON"}`** for an otherwise well-formed status request if the
+  device was mid-redraw when the query line arrived. It now recognises that
+  shape as a retriable miss (a genuine reply always has `.version`) and
+  retries up to twice before giving up.
+
 ## [3.6.0] - 2026-08-13
 
 Multiple Claude Code sessions on one device. Requires Clauled firmware
