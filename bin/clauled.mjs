@@ -12,6 +12,19 @@ import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * The wire schema this plugin speaks. The device accepts EXACTLY this and
+ * rejects anything else with {"error":"unsupported schema version","schema":N}
+ * - there is no negotiation and no backward compatibility, so firmware and
+ * plugin move together.
+ *
+ * Exported and used everywhere rather than written inline. It used to be
+ * hardcoded in eleven places, one of which is inside a PowerShell script
+ * embedded in a template literal - a site that a grep for `v: 3` does not
+ * find. That is the kind of place a version bump silently misses.
+ */
+export const SCHEMA = 4;
+
 const CONFIG_PATH = join(homedir(), '.clauled.json');
 const CACHE_PATH  = join(homedir(), '.clauled-port');
 const MODEL_CACHE = join(homedir(), '.clauled-models.json');
@@ -448,7 +461,7 @@ function probeUnix(path) {
   }
 
   try {
-    const line = Buffer.from(JSON.stringify({ v: 3, cmd: 'status' }) + '\n', 'utf8');
+    const line = Buffer.from(JSON.stringify({ v: SCHEMA, cmd: 'status' }) + '\n', 'utf8');
     for (let off = 0, spins = 0; off < line.length; ) {
       try {
         off += writeSync(fd, line, off, line.length - off);
@@ -502,7 +515,7 @@ export function probeStatus() {
     if (r.ok) return r;
     // A real round trip is preferred, but never let its failure masquerade as
     // an unreachable device - fall back to the write-only signal and say so.
-    const w = push({ v: 3, cmd: 'status' });
+    const w = push({ v: SCHEMA, cmd: 'status' });
     return w.ok
       ? { ok: true, port: path, note: `write-only probe (round trip: ${r.reason})` }
       : w;
@@ -522,7 +535,7 @@ $p.ReadTimeout = 2500
 $p.Open()
 Start-Sleep -Milliseconds 400
 $p.DiscardInBuffer()
-$p.WriteLine('{"v":3,"cmd":"status"}')
+$p.WriteLine('{"v":${SCHEMA},"cmd":"status"}')
 Start-Sleep -Milliseconds 700
 $out = $p.ReadExisting()
 $p.Close()
@@ -928,7 +941,9 @@ function readModelCache() {
 // Unknown levels fall back to the raw value in buildTitle rather than being
 // dropped - that silently lost "ultra" until it was noticed on the glass.
 /**
- * Footer left-hand side: the model alone, e.g. "Opus 5".
+ * The model alone, e.g. "Opus 5". (Where the device draws it is the device's
+ * business - this used to be called buildTitle and documented by its screen
+ * position, which is exactly how the name drifted.)
  *
  * Three sources, in strict freshness order - and the ORDER is the whole
  * point:
@@ -953,7 +968,7 @@ function readModelCache() {
  * `tx` is this push's already-read transcript, threaded in so a single push
  * reads that file once rather than once here and once for the context gauge.
  */
-export function buildTitle(d, tx = undefined) {
+export function buildModel(d, tx = undefined) {
   const sid = buildSid(d);
 
   let model = (d?.model?.display_name || d?.model?.id || '')
@@ -978,7 +993,7 @@ export function buildTitle(d, tx = undefined) {
   return model.slice(0, 14);
 }
 
-/** Footer right-hand side: the effort level, spelled out. */
+/** The effort level, spelled out. */
 export function buildEffort(d) {
   const raw = d?.effort?.level;
   return raw ? String(raw).slice(0, 10) : '';
@@ -1045,7 +1060,7 @@ export function fmtUntil(epochSec) {
  * One feed failing must never blank another.
  */
 export function buildDisplay(d) {
-  const out = { v: 3 };
+  const out = { v: SCHEMA };
 
   // Read the transcript AT MOST ONCE per push. Both the model and the context
   // gauge derive from it, it can be hundreds of KB, and this runs on the UI
@@ -1059,8 +1074,11 @@ export function buildDisplay(d) {
   const sid = buildSid(d);
   if (sid) out.sid = sid;
 
-  const title = buildTitle(d, tx);
-  if (title) out.title = title;
+  // NB: `out.model` is a plain string (the resolved name). `d.model` a few
+  // lines down inside buildModel() is Claude Code's OBJECT, with display_name
+  // and id. Same word, different things.
+  const model = buildModel(d, tx);
+  if (model) out.model = model;
 
   const session = buildSession(d);
   if (session) out.session = session;
@@ -1081,13 +1099,21 @@ export function buildDisplay(d) {
   // far better than a blank one, and the footer already shows staleness.
   const round1 = (n) => Math.round(n * 10) / 10;
 
-  // Labels are short because the device composes them into a single 21-char
-  // line with the detail and the percentage: "5h 4h33m 55%". gauge1/row.left
-  // are account-level on the device (v3.7.0+) - the same value regardless of
-  // which session's push carries it - so there is no per-session logic here
-  // at all, just send what is true right now.
+  // Labels are short because the device composes each metric into a single
+  // 21-char line - label, detail, percentage: "5h 4h33m 55%". The quotas are
+  // ACCOUNT-LEVEL on the device, the same value regardless of which session's
+  // push carries them, so there is no per-session logic here at all - just
+  // send what is true right now.
+  //
+  // Each metric object carries its own detail. In v3 the 5h detail travelled
+  // separately as `row.left` (global) alongside the context detail as
+  // `row.right` (per-session) - one object holding two fields of different
+  // scope, which is precisely what made `row` indefensible.
   const quota = readQuota(d);
-  if (quota) out.gauge1 = { label: '5h', pct: round1(quota.pct) };
+  if (quota) {
+    out.quota5h = { label: '5h', pct: round1(quota.pct) };
+    if (quota.resetAt) out.quota5h.reset = fmtUntil(quota.resetAt);
+  }
 
   // Refresh when the reading is MISSING **or STALE**. This used to be an
   // `else` - refresh only when nothing at all was cached - which quietly
@@ -1100,30 +1126,31 @@ export function buildDisplay(d) {
   // push costs nothing when the cache is warm.
   if (!quota || quota.stale) maybeRefreshQuota();
 
-  // The weekly (7-day, all models) reading rides on the same rate_limits
-  // block as the 5h one - readQuota() already captures it, it just never had
-  // anywhere to go on the device before. gauge3 is a new, fully optional
-  // field: firmware older than v3.7.0 simply ignores it, and the device only
-  // alternates row 1 with it when it actually arrives.
+  // The weekly reading rides on the same rate_limits block as the 5h one.
+  // The FIELD is quota7d - seven-day, which is what every upstream name calls
+  // it (rate_limits.seven_day, anthropic-ratelimit-unified-7d-*). The LABEL
+  // is "1w", which is what fits in two characters on the glass. Keeping the
+  // two deliberately distinct is the point: the field says where the number
+  // comes from, the label says how it reads.
   if (quota?.week != null) {
-    const gauge3 = { label: '1w', pct: round1(quota.week) };
-    if (quota.weekResetAt) gauge3.reset = fmtUntil(quota.weekResetAt);
-    out.gauge3 = gauge3;
+    out.quota7d = { label: '1w', pct: round1(quota.week) };
+    if (quota.weekResetAt) out.quota7d.reset = fmtUntil(quota.weekResetAt);
   }
 
   const ctx = readContext(d, tx);
-  if (ctx) out.gauge2 = { label: 'ctx', pct: round1(Math.min(100, (ctx.used / ctx.size) * 100)) };
+  if (ctx) {
+    out.context = {
+      label: 'ctx',
+      pct: round1(Math.min(100, (ctx.used / ctx.size) * 100)),
+      detail: `${fmtTokens(ctx.used)}/${fmtTokens(ctx.size)}`,
+    };
+  }
 
-  // Detail row pairs each gauge with its most useful companion number. Each
-  // side is independent - one feed being unavailable must not blank the other.
-  const row = {};
-  if (quota?.resetAt) row.left = fmtUntil(quota.resetAt);
-  if (ctx) row.right = `${fmtTokens(ctx.used)}/${fmtTokens(ctx.size)}`;
-  if (Object.keys(row).length) out.row = row;
-
-  // Cost is gone - it duplicated a number Claude Code's own UI already shows.
+  // Cost is gone - it duplicated a number Claude Code's own UI already shows -
+  // and with it the whole `footer` object, which only ever existed to hold the
+  // pair. Effort stands on its own now.
   const effort = buildEffort(d);
-  if (effort) out.footer = { right: effort };
+  if (effort) out.effort = effort;
 
   return out;
 }

@@ -68,12 +68,7 @@ try {
 
 const attention = kind === 'tool' ? ATTENTION_TOOLS[payload.tool_name] : undefined;
 if (attention) {
-  await push({
-    ...buildDisplay(payload),
-    v: 3,
-    busy: '',
-    events: [{ type: 'attention', text: attention }],
-  });
+  await push({ ...buildDisplay(payload), busy: '', banner: attention });
   process.exit(0);
 }
 
@@ -95,7 +90,7 @@ if (kind === 'tool' && payload.tool_name) {
 // Model is the one field hook payloads never carry (only the statusline gets
 // it), so it still falls back to whatever was last cached - there is no
 // fresher source available from inside a hook.
-const body = { ...buildDisplay(payload), v: 3, busy: text.slice(0, 19) };
+const body = { ...buildDisplay(payload), busy: text.slice(0, 19) };
 
 await push(body);
 

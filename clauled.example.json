@@ -11,11 +11,11 @@
   "_debug": "Capture raw statusline and hook payloads to ~/.clauled-debug.log. Contains prompts and file paths; check before sharing.",
   "debug": false,
 
-  "_token": "Optional fallback for the 5h gauge. Normally NOT needed - Claude Code sends rate_limits in the statusline payload, which is used automatically. Only set this if that gauge never populates. From 'claude setup-token'.",
+  "_token": "Optional fallback for the quota rows. Normally NOT needed - Claude Code sends rate_limits in the statusline payload, which is used automatically. Only set this if they never populate. From 'claude setup-token'.",
   "_token_permissions": "If you set it, chmod 600 ~/.clauled.json - it is a real credential valid for a year.",
   "token": "",
 
-  "_quiet": "Local hours (0-23) during which the device powers its panel off after being idle. Requires Clauled firmware v3.5.0. quietEnd is exclusive; quietEnd <= quietStart wraps past midnight (e.g. 23 and 7 for 11pm-7am).",
+  "_quiet": "Local hours (0-23) during which the device powers its panel off after being idle. quietEnd is exclusive; quietEnd <= quietStart wraps past midnight (e.g. 23 and 7 for 11pm-7am).",
   "quietStart": 0,
   "quietEnd": 6
 }

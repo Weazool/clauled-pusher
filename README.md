@@ -11,11 +11,11 @@ The device holds no credentials of any kind, and neither does the plugin.
 
 ## Requirements
 
-- A Clauled device on USB, running **v3.9.0** or later
+- A Clauled device on USB, running **v4.0.0** or later
 - Claude Code (Node 18+ is already a requirement of it)
 - A **data** USB cable — charge-only cables power the board but never enumerate it
 
-Older firmware still works — this plugin paces and frames its writes so it does not depend on the device's own buffer fix — but **v3.9.0 is the one you want**: before it, the device's serial receive queue was smaller than a full display push, so anything over ~261 bytes was truncated and silently dropped.
+**Firmware v4.0.0 is required, not merely recommended.** This plugin speaks wire schema v4, and the device accepts exactly one schema — older firmware rejects every push with `unsupported schema version` and shows nothing. Both move together, which is why their major versions match the schema they speak.
 
 Windows, macOS and Linux, no npm dependencies. Serial writes go through Node's built-in `fs`, and the device is located with tools already present on each platform — PowerShell CIM on Windows, `ioreg` on macOS, sysfs on Linux.
 
@@ -55,7 +55,7 @@ Found by Espressif USB vendor ID (`303A`), not a fixed port — move it to a dif
 
 ## Quiet hours
 
-The device has no clock, so this plugin computes "is it currently quiet hours" from local time and sends it on every push; the device only tracks idle duration. Default midnight–6am, 15 min idle threshold, panel powers fully off once both are true. Requires firmware **v3.5.0**.
+The device has no clock, so this plugin computes "is it currently quiet hours" from local time and sends it on every push; the device only tracks idle duration. Default midnight–6am, 15 min idle threshold, panel powers fully off once both are true.
 
 ```json
 { "quietStart": 23, "quietEnd": 7 }
@@ -76,17 +76,17 @@ The device has no clock, so this plugin computes "is it currently quiet hours" f
 
 Most tools mean Claude is working, so they get a spinner. A few — `ExitPlanMode`, `AskUserQuestion` — mean the opposite: the tool's execution *is* the prompt, so `PreToolUse` fires exactly when your attention starts being needed. Those raise a banner instead, and clear when your next turn starts.
 
-Every trigger pushes the **full display** — session, model, effort, both quota readings, context, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's served from a per-session cache instead (see **Multiple sessions** below).
+Every trigger pushes the **full display** — session, model, effort, both quota readings, context, quiet-hours state — not just the field it exists to add, so nothing goes stale between renders. The one exception is the model: hook payloads never carry it, so it's recovered from the transcript or a per-session cache instead (see **Multiple sessions** below).
 
-Labels stay short (`5h`, `1w`, `ctx`) — the device composes each into one line with its detail and percentage. A field that can't be computed is omitted, never sent as a placeholder; the device merges, so an omitted field just keeps its last value.
+Labels stay short (`5h`, `1w`, `ctx`) — the device composes each into one line with its detail and percentage. Note the label is not the field name: the weekly quota is sent as `quota7d`, which is what every upstream source calls it, and labelled `1w`, which is what fits in two characters. A field that can't be computed is omitted, never sent as a placeholder; the device merges, so an omitted field just keeps its last value.
 
 ## Multiple sessions
 
-Every push is tagged with `sid`, an 8-character key derived from Claude Code's own `session_id`. The device (firmware v3.7.0+) tracks up to 8 concurrent sessions from that tag alone — no coordination needed on this side — and cycles through all of them in turn, every 6 seconds (firmware v3.8.0+; v3.7.0 instead prioritises attention over working over idle). See the firmware's [API.md](https://github.com/Weazool/clauled/blob/main/API.md) for the exact rotation and roster rules.
+Every push is tagged with `sid`, an 8-character key derived from Claude Code's own `session_id`. The device tracks up to 8 concurrent sessions from that tag alone — no coordination needed on this side — and cycles through all of them in turn, every 6 seconds. See the firmware's [API.md](https://github.com/Weazool/clauled/blob/main/API.md) for the exact rotation and roster rules.
 
 The one thing this plugin does own per session: the **model cache**. Hook payloads never carry the model, only the statusline's do, so each session's last-known model is cached separately, keyed by its own `sid` — otherwise session A's model would leak into session B's display the moment they run different ones. If a session's statusline never renders at all — some environments never invoke it — the model instead falls back to whatever the session transcript last recorded, so the footer still isn't left blank.
 
-## The two account gauges
+## The two account quotas
 
 Both are the same value for every session under this login — sent globally, not per-session.
 
@@ -101,7 +101,7 @@ claude setup-token
 { "token": "sk-ant-oat01-..." }
 ```
 
-A real credential, `user:inference` scope, valid a year — `chmod 600` the file. Prefer going without **if** your statusline actually renders; if it doesn't, this is the only source of either gauge.
+A real credential, `user:inference` scope, valid a year — `chmod 600` the file. Prefer going without **if** your statusline actually renders; if it doesn't, this is the only source of either reading.
 
 **Context** — per-session, from the payload's `context_window` when present, else the session transcript.
 
@@ -132,9 +132,9 @@ Runs the real scripts against a synthetic transcript and a throwaway home direct
 
 **`no reply` from the status probe.** Another program is holding the port — close any serial monitor.
 
-**Gauge 1 shows `--`.** No `rate_limits` seen yet; arrives on a later render, or configure a token.
+**The 5h row shows `--`.** No `rate_limits` seen yet; arrives on a later render, or configure a token.
 
-**Gauge 2 shows `--`.** No transcript yet — normal in the first seconds of a session.
+**The context row shows `--`.** No transcript yet — normal in the first seconds of a session.
 
 **Screen is completely dark.** Run `doctor` — reports whether it's quiet-hours power-down (`quiet_sleep: true`) rather than unreachable. Any push wakes it.
 

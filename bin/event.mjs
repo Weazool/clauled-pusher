@@ -44,7 +44,10 @@ if (typeof payload.message === 'string' && payload.message.trim()) {
 // before the turn's usage block is written to the transcript, so its reading
 // always trails by one message. The transcript is current by the time Stop
 // fires, which is what closes that particular gap.
-const body = { ...buildDisplay(payload), v: 3, busy: '', events: [{ type: kind, text }] };
+// `kind` selects the default text above but is no longer sent: v3 wrapped this
+// in events:[{type,text}] and the device never read `type`, nor kept more than
+// the last element.
+const body = { ...buildDisplay(payload), busy: '', banner: text };
 
 await push(body);
 

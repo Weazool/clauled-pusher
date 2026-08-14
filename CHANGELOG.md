@@ -7,6 +7,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-08-14
+
+**BREAKING.** Speaks wire schema `4`. **Requires Clauled firmware 4.0.0** —
+the device accepts exactly one schema and rejects everything else, so the two
+move together. From here the major version of both projects equals the schema
+version, which turns "which firmware do I need" into one digit.
+
+### Changed — breaking
+- **Every drifted field name now says what it does**: `title` → `model`,
+  `gauge1`+`row.left` → `quota5h`, `gauge3` → `quota7d`,
+  `gauge2`+`row.right` → `context`, `footer.right` → `effort`,
+  `events:[{type,text}]` → `banner:"..."`. `row` and `footer` are gone.
+  See the firmware changelog for what each name was wrong about.
+- **`buildTitle()` → `buildModel()`**, and its doc no longer describes the
+  model by where the device happens to draw it — documenting a value by its
+  screen position is exactly how the old name drifted.
+- **The weekly field is `quota7d`, its label is still `1w`.** The field names
+  the source (`rate_limits.seven_day`, `anthropic-ratelimit-unified-7d-*`);
+  the label is what fits in two characters on the glass. Keeping them
+  deliberately distinct is the point.
+- **`doctor`'s fake weekly countdown is `76h23m`, was `3d4h`.** API.md states
+  countdowns are always hours and minutes and calls a day-formatted one the
+  signature of a hardcoded literal — this was that literal.
+
+### Added
+- **`SCHEMA`, exported from `clauled.mjs`.** The version was hardcoded in
+  eleven places, one of them inside a PowerShell script embedded in a template
+  literal — a site no grep for `v: 3` would ever find. Now there is one.
+- **`doctor` prints `schema=` and flags a mismatch** against the plugin's own,
+  so a version disagreement is one command rather than a hand-rolled probe.
+- **A selftest assertion that no v3 field name survives**, run against all
+  three push shapes. `busy.mjs` and `event.mjs` spread `buildDisplay()` and
+  then add their own keys — that seam is exactly where a half-finished rename
+  would survive a migration that looked complete in `buildDisplay()` alone.
+
+### Fixed
+- Selftest assertion *prose* that had been wrong since firmware v3.4.0:
+  `'header carries the model alone'` described the footer.
+
 ## [3.9.0] - 2026-08-14
 
 ### Added

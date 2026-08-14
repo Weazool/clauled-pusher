@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findPort, probeStatus, push, sleepSync, loadConfig, readCachedQuota, fmtUntil, isQuietHours, tokenSourceHint } from './clauled.mjs';
+import { findPort, probeStatus, push, sleepSync, loadConfig, readCachedQuota, fmtUntil, isQuietHours, tokenSourceHint, SCHEMA } from './clauled.mjs';
 
 // A dedicated, fake session id - so the test push lands in its OWN roster
 // slot on the device (v3.7.0+) rather than colliding with a real session or
@@ -80,15 +80,18 @@ if (port) {
   if (r.ok && r.status) {
     ok('device replied');
     const s = r.status;
-    note(`version=${s.version} display_ok=${s.display_ok} uptime=${s.uptime}s last_push_age=${s.last_push_age}`);
+    // schema is printed because the device speaks exactly one and rejects
+    // every other - if it disagrees with this plugin's SCHEMA, that is the
+    // whole diagnosis, and it should not take a hand-rolled probe to see it.
+    note(`version=${s.version} schema=${s.schema}${s.schema !== SCHEMA ? ` (THIS PLUGIN SPEAKS ${SCHEMA} - MISMATCH)` : ''} display_ok=${s.display_ok} uptime=${s.uptime}s last_push_age=${s.last_push_age}`);
     if (typeof s.sessions === 'number') {
       note(`sessions in the roster right now: ${s.sessions}${s.sessions > 1 ? ' - rotating every 6s' : ''}`);
     }
     if (s.quota) {
       // "not alternating" and "alternating but you looked twice at the same
       // moment" are indistinguishable on the glass; the device says which.
-      const q5 = s.quota['5h'], q1w = s.quota['1w'];
-      note(`row 1: 5h=${q5 >= 0 ? q5 + '%' : '--'}  1w=${q1w >= 0 ? q1w + '%' : '--'}  showing ${s.quota.showing}`);
+      const q5 = s.quota['5h'], q7 = s.quota['7d'];
+      note(`row 1: 5h=${q5 >= 0 ? q5 + '%' : '--'}  7d=${q7 >= 0 ? q7 + '%' : '--'}  showing ${s.quota.showing}`);
       if (!s.quota.alternating) {
         note('  not alternating - no weekly reading has reached the device, so the 5h row');
         note('  shows alone. See the quota feed section below.');
@@ -97,7 +100,7 @@ if (port) {
     if (Array.isArray(s.roster) && s.roster.length) {
       for (const r of s.roster) {
         const bits = [r.sid || '(no sid)', r.name ? `"${r.name}"` : '(no name)', `pushed ${r.age}s ago`];
-        if (r.event) bits.push(`event: "${r.event}"`);
+        if (r.banner) bits.push(`banner: "${r.banner}"`);
         if (r.busy) bits.push(`busy: "${r.busy}"`);
         note(`  - ${bits.join('  ')}`);
       }
@@ -125,68 +128,64 @@ if (port) {
   // only ever sends one push at a time, so nothing else exercises this.
   console.log('\npush');
   const display = push({
-    v: 3,
+    v: SCHEMA,
     sid: DOCTOR_SID,
     session: 'doctor',
-    title: 'test',
+    model: 'test',
     quiet,   // the real value - never fake this, it is a live state flag
-    gauge1: { label: '5h', pct: 23 },
-    gauge3: { label: '1w', pct: 61, reset: '3d4h' },
-    gauge2: { label: 'ctx', pct: 42 },
-    row: { left: '1h21m', right: '420k/1M' },
-    footer: { right: 'xhigh' },
+    // "76h23m", not "3d4h": API.md states countdowns are always hours and
+    // minutes, and calls a day-formatted one the signature of a hardcoded
+    // literal. This was that literal.
+    quota5h: { label: '5h', pct: 23, reset: '1h21m' },
+    quota7d: { label: '1w', pct: 61, reset: '76h23m' },
+    context: { label: 'ctx', pct: 42, detail: '420k/1M' },
+    effort: 'xhigh',
   });
   if (display.ok) ok('display push written'); else bad(`display push failed (${display.reason})`);
 
   sleepSync(150);
-  const event = push({ v: 3, sid: DOCTOR_SID, busy: '', events: [{ type: 'attention', text: 'doctor test' }] });
+  const event = push({ v: SCHEMA, sid: DOCTOR_SID, busy: '', banner: 'doctor test' });
   if (event.ok) ok('event push written'); else bad(`event push failed (${event.reason})`);
 
   if (display.ok && event.ok) {
     note('the screen should show two gauges (5h alternating with 1w) and a test banner');
   }
 
-  // RESTORE. gauge1/gauge3 are ACCOUNT-LEVEL on the device (v3.7.0+) - the
-  // same row every session shares - so a fake 23% here does not just sit in
-  // doctor's own slot, it is what EVERY session would show until something
-  // overwrites it. That can be minutes; restore the real cached reading
-  // immediately rather than leave it wrong in the meantime.
+  // RESTORE. Both quotas are ACCOUNT-LEVEL on the device - the same row every
+  // session shares - so a fake 23% here does not just sit in doctor's own
+  // slot, it is what EVERY session would show until something overwrites it.
+  // That can be minutes; restore the real cached reading immediately rather
+  // than leave it wrong in the meantime.
   if (display.ok) {
     const restore = {
-      v: 3, sid: DOCTOR_SID, busy: '',
-      events: [{ type: 'clear', text: '' }],
+      v: SCHEMA, sid: DOCTOR_SID, busy: '',
+      banner: '',
       session: '',   // doctor was never a real session - nothing to restore this TO
       quiet: isQuietHours(cfg),
     };
-    // Deliberately NOT `title: ''`. On the device an explicit empty title is
-    // still a title, and it is promoted into the account-level last-known
+    // Deliberately NOT `model: ''`. On the device an explicit empty model is
+    // still a model, and it is promoted into the account-level last-known
     // model that every session's footer falls back to. The slot is deleted by
     // the forget push below anyway, so there is nothing here worth clearing.
 
-    // gauge1 and row.left are ACCOUNT-LEVEL on the device, so the fakes above
-    // are not confined to doctor's own slot - they are what EVERY session
-    // shows. Restore them UNCONDITIONALLY: with no cached reading, `pct:-1`
-    // and an empty detail put the row back to an honest "--" rather than
-    // leaving a fabricated 23%/1h21m that nothing can ever correct (with no
-    // statusline and no token, no later push carries gauge1 at all).
+    // Restore both UNCONDITIONALLY: with no cached reading, `pct:-1` and an
+    // empty detail put the row back to an honest "--" rather than leaving a
+    // fabricated 23%/1h21m that nothing can ever correct (with no statusline
+    // and no token, no later push carries a quota at all). The weekly figure
+    // especially - it has no token fallback, so there may be nothing real to
+    // restore it TO.
+    //
+    // `reset: ''` is sent explicitly even though the device now drops a stale
+    // detail whenever a new pct arrives without one. This is the one place
+    // where being explicit is worth the bytes.
     const q = readCachedQuota();
-    restore.gauge1 = q ? { label: '5h', pct: Math.round(q.pct * 10) / 10 } : { pct: -1 };
-    restore.row = { left: q?.resetAt ? fmtUntil(q.resetAt) : '' };
-    // gauge3 (the weekly reading) has no token fallback, so there may be
-    // nothing real cached to restore it TO. pct:-1 tells the device to hide
-    // the weekly row again (hasWeek goes false on the device) rather than
-    // leaving doctor's fake 61%/"3d4h" on screen with no real value to
-    // correct it - previously that stuck around until a live payload
-    // happened to carry rate_limits.seven_day again, which in a session
-    // whose statusline never renders may be a very long time.
-    if (q?.week != null) {
-      restore.gauge3 = { label: '1w', pct: Math.round(q.week * 10) / 10 };
-      restore.gauge3.reset = q.weekResetAt ? fmtUntil(q.weekResetAt) : '';
-    } else {
-      // Hide the row AND clear the fake "3d4h" detail. Sending pct alone left
-      // that string latched, ready to be shown beside a real percentage later.
-      restore.gauge3 = { pct: -1, reset: '' };
-    }
+    restore.quota5h = q
+      ? { label: '5h', pct: Math.round(q.pct * 10) / 10, reset: q.resetAt ? fmtUntil(q.resetAt) : '' }
+      : { pct: -1, reset: '' };
+    restore.quota7d = q?.week != null
+      ? { label: '1w', pct: Math.round(q.week * 10) / 10, reset: q.weekResetAt ? fmtUntil(q.weekResetAt) : '' }
+      : { pct: -1, reset: '' };
+
     sleepSync(150);
     const restored = push(restore);
 
@@ -194,7 +193,7 @@ if (port) {
     // over SESSION_GONE_S (15 min) - otherwise every doctor run inflates the
     // session count for a quarter of an hour after the fact.
     sleepSync(150);
-    const forgotten = push({ v: 3, cmd: 'forget', sid: DOCTOR_SID });
+    const forgotten = push({ v: SCHEMA, cmd: 'forget', sid: DOCTOR_SID });
 
     console.log('');
     if (!restored.ok) {

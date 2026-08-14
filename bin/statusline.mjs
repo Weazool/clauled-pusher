@@ -29,11 +29,11 @@ try {
 const display = buildDisplay(payload);
 
 const hasSomething =
-  display.title || (display.gauge1?.pct >= 0) || (display.gauge2?.pct >= 0);
+  display.model || (display.quota5h?.pct >= 0) || (display.context?.pct >= 0);
 if (hasSomething) await push(display);
 
-const q = display.gauge1?.pct;
-const c = display.gauge2?.pct;
+const q = display.quota5h?.pct;
+const c = display.context?.pct;
 
 const parts = [];
 if (q >= 0) parts.push(`5h ${Math.round(q)}%`);
